@@ -3,6 +3,7 @@ Pytest fixtures for versed tests.
 """
 
 import json
+import sqlite3
 import pytest
 from pathlib import Path
 
@@ -14,7 +15,7 @@ DATA_DIR = TEST_DIR.parent / "src" / "versed" / "_data"
 
 @pytest.fixture(scope="session")
 def qcf_mapping_path():
-    """Path to QCF mapping file."""
+    """Path to QCF mapping file (JSON, for raw data tests)."""
     path = DATA_DIR / "qcf_mapping.min.json"
     if not path.exists():
         pytest.skip("QCF mapping file not found")
@@ -23,9 +24,18 @@ def qcf_mapping_path():
 
 @pytest.fixture(scope="session")
 def qcf_mapping(qcf_mapping_path):
-    """Loaded QCF mapping data."""
+    """Loaded QCF mapping data from JSON (for raw data tests)."""
     with open(qcf_mapping_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+@pytest.fixture(scope="session")
+def qcf_db_path():
+    """Path to QCF SQLite database."""
+    path = DATA_DIR / "qcf_mapping.db"
+    if not path.exists():
+        pytest.skip("QCF SQLite database not found")
+    return path
 
 
 @pytest.fixture

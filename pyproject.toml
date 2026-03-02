@@ -38,7 +38,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-versed = ["_data/*.json", "py.typed"]
+versed = ["_data/*.json", "_data/*.db", "py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

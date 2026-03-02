@@ -23,6 +23,7 @@ Usage:
 
 import json
 import re
+import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
@@ -59,7 +60,8 @@ QCF_PUA_RANGES = [
 
 # Default data directory (relative to this file)
 _DATA_DIR = Path(__file__).parent / "_data"
-_COMPACT_MAPPING_PATH = _DATA_DIR / "qcf_mapping.min.json"
+_DB_PATH = _DATA_DIR / "qcf_mapping.db"
+_JSON_PATH = _DATA_DIR / "qcf_mapping.min.json"  # Legacy fallback
 
 
 def is_qcf_glyph(char: str) -> bool:
@@ -93,6 +95,10 @@ class QCFDecoder:
 
     Uses mapping data to convert PUA glyphs back to standard Arabic.
     The mapping is organized by mushaf page for efficient lookup.
+
+    Supports two backends:
+    - SQLite (preferred): lazy per-page loading, low memory (~0 at init)
+    - JSON (legacy fallback): loads all 604 pages into memory (~40 MB)
     """
 
     _instance: Optional['QCFDecoder'] = None
@@ -102,17 +108,20 @@ class QCFDecoder:
         Initialize decoder.
 
         Args:
-            mapping_path: Path to QCF mapping JSON file.
-                         If None and auto_load=True, loads from default data directory.
+            mapping_path: Path to mapping file (.db or .json).
+                         If None and auto_load=True, auto-detects from data dir.
             auto_load: If True and no mapping_path given, auto-load from data dir.
         """
         # page -> {glyph: {arabic, verse_key, word_position, transliteration}}
         self._mapping: Dict[int, Dict[str, Dict[str, Any]]] = {}
         self._verses: Dict[str, str] = {}  # verse_key -> full arabic text
         self._loaded = False
+        self._db_conn: Optional[sqlite3.Connection] = None
+        self._db_path: Optional[str] = None
+        self._pages_cached: set = set()  # Track which pages are loaded
 
         if mapping_path:
-            self._load_mapping(mapping_path)
+            self._load_from_path(mapping_path)
         elif auto_load:
             self._auto_load_mapping()
 
@@ -124,27 +133,45 @@ class QCFDecoder:
         return cls._instance
 
     def _auto_load_mapping(self):
-        """Auto-load mapping from default data directory."""
-        if _COMPACT_MAPPING_PATH.exists():
-            self._load_mapping(str(_COMPACT_MAPPING_PATH))
+        """Auto-load mapping, preferring SQLite over JSON."""
+        if _DB_PATH.exists():
+            self._load_sqlite(str(_DB_PATH))
+        elif _JSON_PATH.exists():
+            self._load_json(str(_JSON_PATH))
 
-    def _load_mapping(self, path: str):
-        """Load QCF mapping from JSON file."""
+    def _load_from_path(self, path: str):
+        """Load from either SQLite or JSON based on file extension."""
+        if path.endswith('.db'):
+            self._load_sqlite(path)
+        else:
+            self._load_json(path)
+
+    def _load_sqlite(self, path: str):
+        """Open SQLite connection (lazy — pages loaded on demand)."""
+        try:
+            self._db_conn = sqlite3.connect(path, check_same_thread=False)
+            self._db_conn.row_factory = sqlite3.Row
+            self._db_path = path
+            self._loaded = True
+        except Exception as e:
+            print(f"Warning: Could not open QCF database {path}: {e}")
+
+    def _load_json(self, path: str):
+        """Load QCF mapping from JSON file (legacy)."""
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
-            # Format: {"pages": {page_num: {glyph: {arabic, verse_key, ...}}}}
             raw_pages = data.get('pages', {})
             for page_str, glyphs in raw_pages.items():
                 page_num = int(page_str)
                 self._mapping[page_num] = {}
                 for glyph, info in glyphs.items():
-                    # Handle both old format (string) and new format (dict)
                     if isinstance(info, str):
                         self._mapping[page_num][glyph] = {"arabic": info}
                     else:
                         self._mapping[page_num][glyph] = info
+                self._pages_cached.add(page_num)
 
             self._verses = data.get('verses', {})
             self._loaded = True
@@ -152,10 +179,47 @@ class QCFDecoder:
         except Exception as e:
             print(f"Warning: Could not load QCF mapping from {path}: {e}")
 
+    def _ensure_page(self, page: int):
+        """Lazy-load a page from SQLite if not cached."""
+        if page in self._pages_cached:
+            return
+        if self._db_conn is None:
+            return
+
+        cursor = self._db_conn.execute(
+            "SELECT glyph, arabic, verse_key, word_position, transliteration "
+            "FROM glyphs WHERE page = ?",
+            (page,),
+        )
+        page_map: Dict[str, Dict[str, Any]] = {}
+        for row in cursor:
+            info: Dict[str, Any] = {"arabic": row[1]}
+            if row[2] is not None:
+                info["verse_key"] = row[2]
+            if row[3] is not None:
+                info["word_position"] = row[3]
+            if row[4] is not None:
+                info["transliteration"] = row[4]
+            page_map[row[0]] = info
+
+        self._mapping[page] = page_map
+        self._pages_cached.add(page)
+
+    def _get_verse_from_db(self, verse_key: str) -> Optional[str]:
+        """Fetch a single verse from SQLite."""
+        if self._db_conn is None:
+            return None
+        cursor = self._db_conn.execute(
+            "SELECT arabic_text FROM verses WHERE verse_key = ?",
+            (verse_key,),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else None
+
     @property
     def is_loaded(self) -> bool:
-        """Check if mapping data is loaded."""
-        return self._loaded and len(self._mapping) > 0
+        """Check if mapping data is available."""
+        return self._loaded
 
     def decode_glyph(self, glyph: str, page: int) -> Optional[Dict[str, Any]]:
         """
@@ -163,8 +227,10 @@ class QCFDecoder:
 
         Returns dict with: arabic, verse_key, word_position, transliteration
         """
-        if page in self._mapping:
-            return self._mapping[page].get(glyph)
+        self._ensure_page(page)
+        page_map = self._mapping.get(page)
+        if page_map:
+            return page_map.get(glyph)
         return None
 
     def decode_text(self, text: str, font_name: str) -> Tuple[str, List[QCFWord]]:
@@ -214,7 +280,12 @@ class QCFDecoder:
 
     def get_verse_text(self, verse_key: str) -> Optional[str]:
         """Get full Arabic text for a verse key."""
-        return self._verses.get(verse_key)
+        result = self._verses.get(verse_key)
+        if result is None:
+            result = self._get_verse_from_db(verse_key)
+            if result is not None:
+                self._verses[verse_key] = result  # Cache
+        return result
 
     def find_verse_key(self, arabic_text: str) -> Optional[str]:
         """
@@ -224,14 +295,28 @@ class QCFDecoder:
         """
         normalized = self._normalize_arabic(arabic_text)
 
-        # Direct lookup in reversed verse index
+        # Try in-memory cache first
         for verse_key, verse_text in self._verses.items():
             verse_normalized = self._normalize_arabic(verse_text)
             if normalized == verse_normalized:
                 return verse_key
-            # Partial match (words appear in verse)
             if normalized in verse_normalized or verse_normalized in normalized:
                 return verse_key
+
+        # Fall back to SQLite scan if available
+        if self._db_conn is not None:
+            cursor = self._db_conn.execute("SELECT verse_key, arabic_text FROM verses")
+            for row in cursor:
+                vk, vt = row[0], row[1]
+                if vk in self._verses:
+                    continue  # Already checked
+                verse_normalized = self._normalize_arabic(vt)
+                if normalized == verse_normalized:
+                    self._verses[vk] = vt
+                    return vk
+                if normalized in verse_normalized or verse_normalized in normalized:
+                    self._verses[vk] = vt
+                    return vk
 
         return None
 
@@ -253,8 +338,28 @@ class QCFDecoder:
 
     def get_stats(self) -> Dict[str, Any]:
         """Get mapping statistics."""
+        if self._db_conn is not None:
+            # Query totals from DB without loading everything
+            page_count = self._db_conn.execute(
+                "SELECT COUNT(DISTINCT page) FROM glyphs"
+            ).fetchone()[0]
+            glyph_count = self._db_conn.execute(
+                "SELECT COUNT(*) FROM glyphs"
+            ).fetchone()[0]
+            verse_count = self._db_conn.execute(
+                "SELECT COUNT(*) FROM verses"
+            ).fetchone()[0]
+            return {
+                "loaded": self._loaded,
+                "backend": "sqlite",
+                "pages": page_count,
+                "verses": verse_count,
+                "glyphs": glyph_count,
+                "pages_cached": len(self._pages_cached),
+            }
         return {
             "loaded": self._loaded,
+            "backend": "json",
             "pages": len(self._mapping),
             "verses": len(self._verses),
             "glyphs": sum(len(g) for g in self._mapping.values()),

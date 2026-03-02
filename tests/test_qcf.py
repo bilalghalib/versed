@@ -139,6 +139,59 @@ class TestQCFWordDataclass:
         assert word.transliteration == "bis'mi"
 
 
+class TestSQLiteBackend:
+    """Test SQLite-specific functionality."""
+
+    def test_sqlite_loads(self):
+        from versed.qcf import _DB_PATH
+        if not _DB_PATH.exists():
+            pytest.skip("SQLite DB not found")
+        QCFDecoder._instance = None
+        decoder = QCFDecoder()
+        assert decoder.is_loaded is True
+        stats = decoder.get_stats()
+        assert stats["backend"] == "sqlite"
+        assert stats["pages"] == 604
+        assert stats["glyphs"] > 70000
+
+    def test_sqlite_lazy_loading(self):
+        from versed.qcf import _DB_PATH
+        if not _DB_PATH.exists():
+            pytest.skip("SQLite DB not found")
+        QCFDecoder._instance = None
+        decoder = QCFDecoder()
+        stats = decoder.get_stats()
+        assert stats["pages_cached"] == 0  # Nothing loaded yet
+
+        # Decode a glyph — triggers page 1 load
+        info = decoder.decode_glyph("\uFB51", 1)
+        assert info is not None
+        assert info["arabic"] == "بِسْمِ"
+        stats = decoder.get_stats()
+        assert stats["pages_cached"] == 1  # Only page 1 loaded
+
+    def test_sqlite_verse_lookup(self):
+        from versed.qcf import _DB_PATH
+        if not _DB_PATH.exists():
+            pytest.skip("SQLite DB not found")
+        QCFDecoder._instance = None
+        decoder = QCFDecoder()
+        text = decoder.get_verse_text("1:1")
+        assert text is not None
+        assert "بِسْمِ" in text
+
+    def test_sqlite_decode_page1_bismillah(self):
+        from versed.qcf import _DB_PATH
+        if not _DB_PATH.exists():
+            pytest.skip("SQLite DB not found")
+        QCFDecoder._instance = None
+        decoder = QCFDecoder()
+        arabic, words = decoder.decode_text("\uFB51\uFB52\uFB53\uFB54", "QCF_P001")
+        assert len(words) == 4
+        assert words[0].arabic == "بِسْمِ"
+        assert words[0].verse_key == "1:1"
+
+
 class TestDecodeText:
     """Test text decoding functionality."""
 
