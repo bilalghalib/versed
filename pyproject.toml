@@ -1,0 +1,46 @@
+[project]
+name = "versed-repair"
+version = "1.0.0"
+description = "Arabic-aware PDF text repair — fixes QCF Quran fonts, Sabon mojibake, honorific glyphs"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Versed Team"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing :: Linguistic",
+]
+keywords = ["arabic", "pdf", "text-extraction", "mojibake", "quran", "ocr", "nlp"]
+
+dependencies = []  # Zero required deps! Pure Python for string repair.
+
+[project.optional-dependencies]
+pdf = ["pymupdf>=1.24.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+versed = "versed.cli:main"
+
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+versed = ["_data/*.json", "py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
