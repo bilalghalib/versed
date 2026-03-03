@@ -66,6 +66,10 @@ _JSON_PATH = _DATA_DIR / "qcf_mapping.min.json"  # Legacy fallback
 
 def is_qcf_glyph(char: str) -> bool:
     """Check if a character is a QCF PUA glyph."""
+    if not char:
+        return False
+    if len(char) != 1:
+        return all(is_qcf_glyph(single_char) for single_char in char)
     code = ord(char)
     for start, end in QCF_PUA_RANGES:
         if start <= code <= end:
@@ -382,7 +386,7 @@ def detect_qcf_regions(pdf_path: str, page_number: int) -> List[Dict]:
         import pymupdf
     except ImportError:
         raise ImportError(
-            "detect_qcf_regions requires pymupdf: pip install 'versed-repair[pdf]'"
+            "detect_qcf_regions requires pymupdf: pip install 'versed-pdf[pdf]'"
         )
 
     regions = []

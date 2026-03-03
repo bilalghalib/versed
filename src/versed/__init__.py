@@ -1,20 +1,144 @@
-"""
-versed — Arabic-aware PDF text repair.
+"""versed — local PDF-to-Markdown tooling for Arabic and bilingual texts."""
 
-Fixes QCF Quran fonts, Sabon mojibake, and honorific glyphs.
+__version__ = "1.1.0"
 
-    from versed import repair_text, detect_mojibake
-
-    clean = repair_text("tafß¬l")          # → "tafṣīl"
-    report = detect_mojibake(raw_text)      # → MojibakeReport
-"""
-
-__version__ = "1.0.0"
-
-from .repair import repair_text, repair_text_for_font, is_repairable_font, SABON_CHAR_REPAIR
-from .qcf import QCFDecoder, is_qcf_text, is_qcf_glyph, detect_qcf_regions
-from .honorifics import (
-    normalize_text, normalize_words, decode_honorific,
-    expand_honorifics, HONORIFIC_SYMBOLS, NormalizedWord,
+from .arabic import (
+    detect_batch_reversal,
+    is_arabic,
+    is_mostly_arabic,
+    orphan_diacritic_rate,
+    strip_diacritics,
 )
-from .detect import detect_mojibake, MojibakeReport
+from .classify import (
+    BackendConfig,
+    PageProbe,
+    PageType,
+    classify_and_select,
+    classify_page,
+    select_backend,
+)
+from .detect import (
+    KNOWN_MOJIBAKE_CHARS,
+    MojibakeReport,
+    detect_mojibake,
+    detect_mojibake_in_pdf,
+)
+from .extract import ExtractResult, extract_document
+from .health import summarize_text_health
+from .honorifics import (
+    HONORIFIC_SYMBOLS,
+    NormalizedWord,
+    annotate_transliterations,
+    decode_honorific,
+    expand_honorifics,
+    find_transliteration,
+    get_spoken_text,
+    has_leading_honorific,
+    normalize_text,
+    normalize_words,
+)
+from .layout import (
+    document_from_aligned_words,
+    document_from_markdown,
+    document_from_structured,
+)
+from .markdown import (
+    EnhancedMarkdownResult,
+    build_enhanced_markdown,
+    compute_aligned_words_checksum,
+    compute_cache_key,
+)
+from .qcf import (
+    QCFDecoder,
+    QCFVerse,
+    QCFWord,
+    build_qcf_mapping_from_quran_data,
+    detect_qcf_regions,
+    extract_qcf_page_number,
+    is_qcf_glyph,
+    is_qcf_text,
+)
+from .repair import (
+    SABON_CHAR_REPAIR,
+    SABON_FONT_PREFIXES,
+    extract_repairable_font_spans,
+    find_font_for_word,
+    is_repairable_font,
+    repair_text,
+    repair_text_for_font,
+    repair_words_with_font_info,
+)
+from .routing import (
+    EnrichmentDecision,
+    PageObservations,
+    TaskNeeds,
+    observe_from_extraction,
+    observe_page,
+    route_enrichment,
+)
+from .types import AlignedWord, BlockType, Document, TextBlock, WordBox
+
+__all__ = [
+    "AlignedWord",
+    "BackendConfig",
+    "BlockType",
+    "Document",
+    "EnhancedMarkdownResult",
+    "EnrichmentDecision",
+    "ExtractResult",
+    "HONORIFIC_SYMBOLS",
+    "KNOWN_MOJIBAKE_CHARS",
+    "MojibakeReport",
+    "NormalizedWord",
+    "PageObservations",
+    "PageProbe",
+    "PageType",
+    "QCFDecoder",
+    "QCFVerse",
+    "QCFWord",
+    "SABON_CHAR_REPAIR",
+    "SABON_FONT_PREFIXES",
+    "TaskNeeds",
+    "TextBlock",
+    "WordBox",
+    "annotate_transliterations",
+    "build_enhanced_markdown",
+    "build_qcf_mapping_from_quran_data",
+    "classify_and_select",
+    "classify_page",
+    "compute_aligned_words_checksum",
+    "compute_cache_key",
+    "decode_honorific",
+    "detect_batch_reversal",
+    "detect_mojibake",
+    "detect_mojibake_in_pdf",
+    "detect_qcf_regions",
+    "document_from_aligned_words",
+    "document_from_markdown",
+    "document_from_structured",
+    "expand_honorifics",
+    "extract_document",
+    "extract_qcf_page_number",
+    "extract_repairable_font_spans",
+    "find_font_for_word",
+    "find_transliteration",
+    "get_spoken_text",
+    "has_leading_honorific",
+    "is_arabic",
+    "is_mostly_arabic",
+    "is_qcf_glyph",
+    "is_qcf_text",
+    "is_repairable_font",
+    "normalize_text",
+    "normalize_words",
+    "observe_from_extraction",
+    "observe_page",
+    "orphan_diacritic_rate",
+    "repair_text",
+    "repair_text_for_font",
+    "repair_words_with_font_info",
+    "route_enrichment",
+    "select_backend",
+    "strip_diacritics",
+    "summarize_text_health",
+]

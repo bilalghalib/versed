@@ -95,7 +95,7 @@ def detect_mojibake_in_pdf(
         import pymupdf
     except ImportError:
         raise ImportError(
-            "detect_mojibake_in_pdf requires pymupdf: pip install 'versed-repair[pdf]'"
+            "detect_mojibake_in_pdf requires pymupdf: pip install 'versed-pdf[pdf]'"
         )
 
     doc = pymupdf.open(pdf_path)

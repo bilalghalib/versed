@@ -1,7 +1,7 @@
 [project]
-name = "versed-repair"
-version = "1.0.0"
-description = "Arabic-aware PDF text repair — fixes QCF Quran fonts, Sabon mojibake, honorific glyphs"
+name = "versed-pdf"
+version = "1.1.0"
+description = "Semantic PDF-to-Markdown engine for Arabic and bilingual texts with local routing and repair"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -19,12 +19,13 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Text Processing :: Linguistic",
 ]
-keywords = ["arabic", "pdf", "text-extraction", "mojibake", "quran", "ocr", "nlp"]
+keywords = ["arabic", "pdf", "markdown", "text-extraction", "quran", "ocr", "nlp"]
 
 dependencies = []  # Zero required deps! Pure Python for string repair.
 
 [project.optional-dependencies]
 pdf = ["pymupdf>=1.24.0"]
+ocr = ["pytesseract>=0.3.10", "Pillow>=10.0.0"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

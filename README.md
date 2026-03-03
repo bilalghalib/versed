@@ -1,41 +1,44 @@
 # versed
 
-Arabic-aware PDF text repair. Fixes QCF Quran fonts, Sabon mojibake, and honorific glyphs.
+Local PDF-to-Markdown tooling for Arabic and bilingual texts.
+
+It repairs broken extraction, decodes QCF Quran fonts, classifies pages, and renders semantic Markdown from local PDFs.
 
 ## Install
 
 ```bash
-pip install versed-repair          # pure Python, zero deps
-pip install versed-repair[pdf]     # adds pymupdf for PDF extraction
+pip install versed-pdf
+pip install versed-pdf[pdf]
+pip install versed-pdf[pdf,ocr]
 ```
 
 ## Quick start
 
 ```python
-from versed import repair_text, detect_mojibake
+from versed import extract_document
 
-# Fix Sabon font mojibake
-clean = repair_text("tafß¬l")   # → "tafṣīl"
-
-# Detect encoding corruption
-report = detect_mojibake(raw_text)
-if report.has_mojibake:
-    print(f"Found {report.mojibake_count} corrupted characters")
+result = extract_document("book.pdf", title="Book")
+print(result.markdown)
 ```
 
 ## CLI
 
 ```bash
-versed repair-text "tafß¬l"           # → tafṣīl
-versed repair input.pdf               # extract + repair PDF text
-versed detect input.pdf               # mojibake detection report
+versed repair-text "tafß¬l"
+versed detect book.pdf
+versed classify book.pdf
+versed extract book.pdf -o book.md
 ```
 
-## What it fixes
+## Public modules
 
-- **Sabon font mojibake**: `ß→ṣ`, `¬→ī`, `¤→ḥ` (broken ToUnicode CMaps)
-- **QCF Quran fonts**: PUA glyph → Arabic mapping for 604 mushaf pages
-- **Honorific glyphs**: `ﷺ→صلى الله عليه وسلم`, `ﷻ→سبحانه وتعالى`, etc.
+- `versed.repair`: Sabon mojibake repair helpers
+- `versed.qcf`: QCF Quran font decoding
+- `versed.classify`: local page classification and backend selection
+- `versed.routing`: cost-aware routing heuristics
+- `versed.layout`: aligned words to semantic blocks
+- `versed.markdown`: semantic blocks to Markdown/plain text
+- `versed.extract`: end-to-end local extraction
 
 ## License
 
