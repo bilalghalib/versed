@@ -7,6 +7,7 @@ import json
 import sys
 from dataclasses import is_dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 
 
@@ -32,6 +33,25 @@ def _load_pymupdf():
     return pymupdf
 
 
+def _validate_input_path(input_path: str) -> bool:
+    path = Path(input_path).expanduser()
+    if not path.exists():
+        print(f"Error: Input PDF not found: {input_path}", file=sys.stderr)
+        return False
+    if not path.is_file():
+        print(f"Error: Input path is not a file: {input_path}", file=sys.stderr)
+        return False
+    return True
+
+
+def _open_document(pymupdf: Any, input_path: str):
+    try:
+        return pymupdf.open(input_path)
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        print(f"Error: Could not open PDF '{input_path}': {exc}", file=sys.stderr)
+        return None
+
+
 def cmd_repair_text(args: argparse.Namespace) -> int:
     """Repair a raw text string without opening a PDF."""
     from versed.repair import repair_text
@@ -45,10 +65,14 @@ def cmd_repair(args: argparse.Namespace) -> int:
     pymupdf = _load_pymupdf()
     if pymupdf is None:
         return 1
+    if not _validate_input_path(args.input):
+        return 1
 
     from versed.repair import extract_repairable_font_spans, repair_words_with_font_info
 
-    document = pymupdf.open(args.input)
+    document = _open_document(pymupdf, args.input)
+    if document is None:
+        return 1
     page_texts = []
     json_rows = []
 
@@ -127,10 +151,14 @@ def cmd_classify(args: argparse.Namespace) -> int:
     pymupdf = _load_pymupdf()
     if pymupdf is None:
         return 1
+    if not _validate_input_path(args.input):
+        return 1
 
     from versed.classify import classify_and_select
 
-    document = pymupdf.open(args.input)
+    document = _open_document(pymupdf, args.input)
+    if document is None:
+        return 1
     rows = []
     for page_index in range(len(document)):
         page_type, backend = classify_and_select(args.input, page_index + 1)
@@ -163,6 +191,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
     """Run the full local extract -> classify -> markdown pipeline."""
     from versed.extract import extract_document
 
+    if not _validate_input_path(args.input):
+        return 1
+
     try:
         result = extract_document(
             args.input,
@@ -172,6 +203,9 @@ def cmd_extract(args: argparse.Namespace) -> int:
         )
     except ImportError as exc:
         print(str(exc), file=sys.stderr)
+        return 1
+    except (FileNotFoundError, OSError, RuntimeError) as exc:
+        print(f"Error: Could not open PDF '{args.input}': {exc}", file=sys.stderr)
         return 1
 
     unsupported_pages = result.stats.get("unsupported_pages", [])

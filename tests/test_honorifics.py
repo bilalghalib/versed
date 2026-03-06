@@ -1,5 +1,5 @@
 """
-Tests for lisan.honorifics — text normalizer for Islamic texts.
+Tests for versed.honorifics — text normalizer for Islamic texts.
 
 Covers:
 - Honorific symbols (ﷺ ﷻ etc.)

@@ -1,5 +1,5 @@
 """
-Tests for lisan.qcf — QCF (Quran Complex Font) decoder.
+Tests for versed.qcf — QCF (Quran Complex Font) decoder.
 
 The QCF decoder maps Private Use Area glyphs to Arabic text
 with verse references based on the mushaf page.

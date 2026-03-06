@@ -54,3 +54,35 @@ class TestLayoutAndMarkdown:
         document = document_from_aligned_words(words)
         assert document.blocks[0].type == BlockType.HEADING
 
+    def test_page_boundary_starts_new_block(self):
+        words = [
+            AlignedWord(
+                text="page1",
+                spoken_text="page1",
+                language="en",
+                role="body",
+                block_no=1_000_000,
+                line_no=0,
+                word_no=0,
+                y=700,
+                height=10,
+                meta={"page": 1},
+            ),
+            AlignedWord(
+                text="page2",
+                spoken_text="page2",
+                language="en",
+                role="body",
+                block_no=2_000_000,
+                line_no=0,
+                word_no=0,
+                y=10,
+                height=10,
+                meta={"page": 2},
+            ),
+        ]
+
+        document = document_from_aligned_words(words)
+        assert len(document.blocks) == 2
+        assert document.blocks[0].text == "page1"
+        assert document.blocks[1].text == "page2"

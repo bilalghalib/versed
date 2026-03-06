@@ -176,7 +176,7 @@ def document_from_aligned_words(
     sorted_words = _sort_words_by_reading_order(words)
     word_groups = _group_words_into_blocks(sorted_words, paragraph_gap_ratio)
 
-    blocks_with_y: List[Tuple[float, TextBlock]] = []
+    blocks_with_y: List[Tuple[int, float, TextBlock]] = []
     for word_group in word_groups:
         if not word_group:
             continue
@@ -187,20 +187,23 @@ def document_from_aligned_words(
 
         ys = [word.y for word in word_group if word.y is not None]
         avg_y = (sum(ys) / len(ys)) if ys else 0.0
+        page_number = _group_page_identity(word_group) or 0
         block_type = _infer_block_type(word_group)
         meta = _extract_block_metadata(word_group)
-        blocks_with_y.append((avg_y, TextBlock(type=block_type, text=block_text, meta=meta)))
+        blocks_with_y.append((page_number, avg_y, TextBlock(type=block_type, text=block_text, meta=meta)))
 
     if figures:
         for figure in figures:
             bbox = figure.get("bbox", [0, 0, 0, 0])
             figure_y = bbox[1] if len(bbox) > 1 else 0
+            figure_page = figure.get("page") or 0
             description = figure.get("description", "")
             if figure.get("caption"):
                 description = f"{figure['caption']}. {description}".strip(". ")
 
             blocks_with_y.append(
                 (
+                    figure_page,
                     figure_y,
                     TextBlock(
                         type=BlockType.FIGURE,
@@ -217,8 +220,8 @@ def document_from_aligned_words(
                 )
             )
 
-    blocks_with_y.sort(key=lambda item: item[0])
-    blocks = [block for _, block in blocks_with_y]
+    blocks_with_y.sort(key=lambda item: (item[0], item[1]))
+    blocks = [block for _, _, block in blocks_with_y]
     full_text = " ".join(block.text for block in blocks)
 
     return Document(
@@ -312,6 +315,11 @@ def _group_words_into_blocks(
         word = words[index]
         previous = words[index - 1]
 
+        if _page_identity(word) != _page_identity(previous):
+            groups.append(current_group)
+            current_group = [word]
+            continue
+
         if word.role != previous.role:
             groups.append(current_group)
             current_group = [word]
@@ -345,6 +353,26 @@ def _group_words_into_blocks(
         groups.append(current_group)
 
     return groups
+
+
+def _page_identity(word: AlignedWord) -> Optional[int]:
+    page_number = word.meta.get("page")
+    if isinstance(page_number, int):
+        return page_number
+
+    # The public extract pipeline encodes page buckets into large block numbers.
+    if word.block_no >= 1_000_000:
+        return word.block_no // 1_000_000
+
+    return None
+
+
+def _group_page_identity(words: List[AlignedWord]) -> Optional[int]:
+    for word in words:
+        page_number = _page_identity(word)
+        if page_number is not None:
+            return page_number
+    return None
 
 
 def _infer_block_type(words: List[AlignedWord]) -> BlockType:
@@ -427,4 +455,3 @@ def _dict_to_aligned_word(data: Dict[str, Any]) -> AlignedWord:
         height=height,
         meta=meta,
     )
-

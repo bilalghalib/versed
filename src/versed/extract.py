@@ -57,6 +57,7 @@ def extract_document(
 
     aligned_words: List[AlignedWord] = []
     page_reports: List[Dict[str, Any]] = []
+    unsupported_pages: List[int] = []
 
     for page_index in range(len(document)):
         page_number = page_index + 1
@@ -78,6 +79,8 @@ def extract_document(
                     ocr_text = _extract_ocr_text(page)
                 except ImportError as exc:
                     report["warnings"].append(str(exc))
+                except Exception as exc:
+                    report["warnings"].append(f"OCR failed for this page: {exc}")
                 else:
                     if ocr_text.strip():
                         aligned_words.extend(_build_words_from_text(ocr_text, page_number, source="ocr"))
@@ -95,6 +98,9 @@ def extract_document(
             elif page_type == PageType.QCF_QURAN:
                 report["warnings"].append("QCF page detected but no decodable text was recovered.")
 
+        if backend.force_ocr and not report["used_ocr"]:
+            unsupported_pages.append(page_number)
+
         page_reports.append(report)
 
     document.close()
@@ -102,11 +108,6 @@ def extract_document(
     markdown_result = build_enhanced_markdown(aligned_words, title=title)
     public_document = _document_from_words(aligned_words, title)
 
-    unsupported_pages = [
-        report["page_number"]
-        for report in page_reports
-        if any("OCR required" in warning or "Install with: pip install 'versed-pdf[ocr]'" in warning for warning in report["warnings"])
-    ]
     used_ocr_pages = [report["page_number"] for report in page_reports if report["used_ocr"]]
 
     stats = {

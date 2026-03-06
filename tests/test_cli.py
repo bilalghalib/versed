@@ -2,7 +2,7 @@
 
 from argparse import Namespace
 
-from versed.cli import cmd_extract, main
+from versed.cli import cmd_classify, cmd_extract, cmd_repair, main
 from versed.extract import ExtractResult
 from versed.types import Document
 
@@ -38,3 +38,22 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "Unsupported pages require OCR" in captured.err
 
+    def test_cmd_classify_returns_error_for_missing_input(self, monkeypatch, tmp_path, capsys):
+        missing_path = tmp_path / "missing.pdf"
+        monkeypatch.setattr("versed.cli._load_pymupdf", lambda: object())
+
+        exit_code = cmd_classify(Namespace(input=str(missing_path), format="text"))
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Input PDF not found" in captured.err
+
+    def test_cmd_repair_returns_error_for_missing_input(self, monkeypatch, tmp_path, capsys):
+        missing_path = tmp_path / "missing.pdf"
+        monkeypatch.setattr("versed.cli._load_pymupdf", lambda: object())
+
+        exit_code = cmd_repair(Namespace(input=str(missing_path), output=None, format="text"))
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Input PDF not found" in captured.err

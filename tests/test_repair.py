@@ -1,5 +1,5 @@
 """
-Tests for lisan.repair — font-aware encoding repair for Sabon fonts.
+Tests for versed.repair — font-aware encoding repair for Sabon fonts.
 
 Tests that:
 1. Character repair map is applied correctly for Sabon fonts

@@ -68,3 +68,17 @@ class TestExtractDocument:
         assert result.stats["unsupported_pages"] == [1]
         assert "OCR required" in result.pages[0]["warnings"][0]
 
+    def test_extract_reports_ocr_runtime_failure_as_warning(self, monkeypatch):
+        fake_doc = _FakeDoc([_FakePage([])])
+
+        monkeypatch.setattr("versed.extract._load_pymupdf", lambda: _FakePyMuPDF(fake_doc))
+        monkeypatch.setattr("versed.extract.classify_page", lambda pdf_path, page_number: PageType.SCANNED_ENGLISH)
+        monkeypatch.setattr(
+            "versed.extract._extract_ocr_text",
+            lambda page: (_ for _ in ()).throw(RuntimeError("tesseract binary not found")),
+        )
+
+        result = extract_document("dummy.pdf", title="Demo", allow_ocr=True)
+        assert result.stats["unsupported_pages"] == [1]
+        assert result.pages[0]["used_ocr"] is False
+        assert "OCR failed for this page" in result.pages[0]["warnings"][0]

@@ -1,5 +1,5 @@
 """
-Tests for lisan.detect — mojibake detection heuristics.
+Tests for versed.detect — mojibake detection heuristics.
 """
 
 from versed.detect import detect_mojibake, MojibakeReport, KNOWN_MOJIBAKE_CHARS
