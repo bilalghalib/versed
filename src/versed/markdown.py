@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
 from .layout import document_from_aligned_words
-from .types import AlignedWord, BlockType, TextBlock
+from .types import AlignedWord, BlockType, Document, TextBlock
 
 
 BUILDER_VERSION = "1.0.0"
@@ -66,19 +66,27 @@ def build_enhanced_markdown(
     title: str = "",
 ) -> EnhancedMarkdownResult:
     """Build semantic markdown and plain text from aligned words."""
+    document = document_from_aligned_words(aligned_words, title=title, figures=figures)
     words_checksum = compute_aligned_words_checksum(aligned_words)
     figures_checksum = _compute_figures_checksum(figures) if figures else ""
+    return _build_markdown_from_document(
+        document,
+        checksum=compute_cache_key(words_checksum, figures_checksum),
+    )
 
-    if not aligned_words and not figures:
-        return EnhancedMarkdownResult(
-            markdown="",
-            plain_text="",
-            version=BUILDER_VERSION,
-            checksum=compute_cache_key(words_checksum, figures_checksum),
-        )
+def build_markdown_from_document(document: Document) -> EnhancedMarkdownResult:
+    """Build semantic markdown and plain text from a public Document."""
+    return _build_markdown_from_document(
+        document,
+        checksum=_compute_document_checksum(document),
+    )
 
-    document = document_from_aligned_words(aligned_words, title=title, figures=figures)
 
+def _build_markdown_from_document(
+    document: Document,
+    *,
+    checksum: str,
+) -> EnhancedMarkdownResult:
     markdown_parts: List[str] = []
     plain_parts: List[str] = []
 
@@ -97,7 +105,7 @@ def build_enhanced_markdown(
         markdown="\n\n".join(markdown_parts),
         plain_text="\n\n".join(plain_parts),
         version=BUILDER_VERSION,
-        checksum=compute_cache_key(words_checksum, figures_checksum),
+        checksum=checksum,
     )
 
 
@@ -164,3 +172,13 @@ def _compute_figures_checksum(figures: List[Dict[str, object]]) -> str:
     parts = [json.dumps(figure, sort_keys=True, ensure_ascii=False) for figure in figures]
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
+
+def _compute_document_checksum(document: Document) -> str:
+    payload = {
+        "title": document.title,
+        "subtitle": document.subtitle,
+        "language": document.language,
+        "blocks": [block.to_dict() for block in document.blocks],
+    }
+    content = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(f"{content}+{BUILDER_VERSION}".encode("utf-8")).hexdigest()[:16]

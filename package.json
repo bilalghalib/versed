@@ -1,0 +1,7 @@
+{
+  "name": "versed-openiti-parser",
+  "private": true,
+  "dependencies": {
+    "@openiti/markdown-parser": "^1.2.2"
+  }
+}

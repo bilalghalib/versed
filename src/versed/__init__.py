@@ -44,9 +44,28 @@ from .layout import (
 )
 from .markdown import (
     EnhancedMarkdownResult,
+    build_markdown_from_document,
     build_enhanced_markdown,
     compute_aligned_words_checksum,
     compute_cache_key,
+)
+from .openiti import (
+    OpenITIPage,
+    assign_openiti_pages,
+    build_openiti_markdown,
+    document_from_openiti_blocks,
+)
+from .openiti_parser import (
+    ARABIC_CHAR as OPENITI_ARABIC_CHAR,
+    Block as OpenITIBlock,
+    BlockType as OpenITIBlockType,
+    ParsedDocument as OpenITIParsedDocument,
+    parse_openiti as parse_openiti_markdown,
+)
+from .openiti_renderer import (
+    THEMES as OPENITI_THEMES,
+    BookTheme as OpenITIBookTheme,
+    render_book as render_openiti_book,
 )
 from .qcf import (
     QCFDecoder,
@@ -90,6 +109,13 @@ __all__ = [
     "KNOWN_MOJIBAKE_CHARS",
     "MojibakeReport",
     "NormalizedWord",
+    "OpenITIPage",
+    "OpenITIBlock",
+    "OpenITIBlockType",
+    "OpenITIBookTheme",
+    "OpenITIParsedDocument",
+    "OPENITI_ARABIC_CHAR",
+    "OPENITI_THEMES",
     "PageObservations",
     "PageProbe",
     "PageType",
@@ -101,8 +127,11 @@ __all__ = [
     "TaskNeeds",
     "TextBlock",
     "WordBox",
+    "assign_openiti_pages",
     "annotate_transliterations",
     "build_enhanced_markdown",
+    "build_markdown_from_document",
+    "build_openiti_markdown",
     "build_qcf_mapping_from_quran_data",
     "classify_and_select",
     "classify_page",
@@ -115,6 +144,7 @@ __all__ = [
     "detect_qcf_regions",
     "document_from_aligned_words",
     "document_from_markdown",
+    "document_from_openiti_blocks",
     "document_from_structured",
     "expand_honorifics",
     "extract_document",
@@ -137,8 +167,10 @@ __all__ = [
     "repair_text",
     "repair_text_for_font",
     "repair_words_with_font_info",
+    "render_openiti_book",
     "route_enrichment",
     "select_backend",
+    "parse_openiti_markdown",
     "strip_diacritics",
     "summarize_text_health",
 ]
