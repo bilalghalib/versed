@@ -262,6 +262,8 @@ def render_book(
     y = theme.margin_top
     current_chapter = doc.title or ""
     current_section = ""
+    all_word_coords: list[dict] = []
+    current_block_index = 0
 
     def ml() -> float:
         return theme.margin_inner if page_num % 2 == 0 else theme.margin_outer
@@ -333,8 +335,9 @@ def render_book(
         justify: bool = True,
         spacing_after: Optional[float] = None,
         use_kashida: bool = False,
+        track_words: bool = True,
     ) -> None:
-        nonlocal y
+        nonlocal y, current_block_index
         layout = make_layout(font_size=font_size, bold=bold)
         layout.set_alignment(Pango.Alignment.CENTER if centered else Pango.Alignment.RIGHT)
         layout.set_justify(justify and not centered)
@@ -347,6 +350,42 @@ def render_book(
         check_space(ext.height + spacing)
         if y + ext.height > max_y():
             new_page()
+
+        # Extract per-word coordinates before rendering
+        if track_words:
+            origin_x = ml()
+            origin_y = y
+            text_bytes = text.encode("utf-8")
+            words = text.split()
+            byte_offset = 0
+            for word_index, word in enumerate(words):
+                word_bytes = word.encode("utf-8")
+                # Find the byte offset of this word in the full text
+                pos_in_bytes = text_bytes.find(word_bytes, byte_offset)
+                if pos_in_bytes < 0:
+                    continue
+                rect = layout.index_to_pos(pos_in_bytes)
+                # Pango returns values in Pango units (1/1024 pixel)
+                px = rect.x / Pango.SCALE
+                py = rect.y / Pango.SCALE
+                pw = rect.width / Pango.SCALE
+                ph = rect.height / Pango.SCALE
+                # For RTL text, width can be negative
+                if pw < 0:
+                    px = px + pw
+                    pw = -pw
+                all_word_coords.append({
+                    "text": word,
+                    "x": origin_x + px,
+                    "y": origin_y + py,
+                    "width": pw,
+                    "height": ph,
+                    "page": page_num,
+                    "block_index": current_block_index,
+                    "word_index": word_index,
+                })
+                byte_offset = pos_in_bytes + len(word_bytes)
+
         cr.set_source_rgb(*(color or theme.color_body))
         cr.move_to(ml(), y)
         PangoCairo.show_layout(cr, layout)
@@ -670,6 +709,8 @@ def render_book(
 
         prev = block.type
         i += 1
+        if block.type not in (BlockType.PAGE_REF, BlockType.MILESTONE):
+            current_block_index += 1
 
     num = str(page_num).translate(W2E)
     cr.set_source_rgb(*theme.color_ornament)
@@ -695,4 +736,5 @@ def render_book(
         "entities": entity_count,
         "review_tags": review_count,
         "theme": theme_name,
+        "word_coordinates": all_word_coords,
     }
