@@ -25,8 +25,10 @@ def test_render_book_returns_word_coordinates():
         result = render_book(doc, out_path)
         assert "word_coordinates" in result, "render_book must return word_coordinates"
         coords = result["word_coordinates"]
-        assert len(coords) == 4, f"Expected 4 words, got {len(coords)}"
-        for wc in coords:
+        # Filter to content pages (page > 0, cover is page 0)
+        content_coords = [wc for wc in coords if wc["page"] > 0]
+        assert len(content_coords) == 4, f"Expected 4 Arabic words, got {len(content_coords)}"
+        for wc in content_coords:
             assert "text" in wc
             assert "x" in wc and "y" in wc
             assert "width" in wc and "height" in wc

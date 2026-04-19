@@ -320,17 +320,27 @@ def _block_from_external_context(raw_line: str, content: str, external_block: Op
     return Block(BlockType.PARAGRAPH, content)
 
 
+def _classify_content(text: str, ext_block: Optional[Dict[str, Any]] = None) -> Block:
+    """Classify a content string into a typed Block using inline markers."""
+    cleaned = _strip_inline_markers(text)
+    if not cleaned:
+        return Block(BlockType.PARAGRAPH, "")
+    return _block_from_external_context(text, cleaned, ext_block)
+
+
 def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocument:
-    """Parse OpenITI mARkdown via @openiti/markdown-parser."""
+    """Parse OpenITI mARkdown via @openiti/markdown-parser.
+
+    Delegates to the canonical ``@openiti/markdown-parser`` npm package
+    and converts its structured JSON output into our Block model.
+    """
 
     header_text = ""
-    body_text = text
     if META_END in text:
-        header_text, body_text = text.split(META_END, 1)
+        header_text, _ = text.split(META_END, 1)
 
     payload = _run_external_openiti_parser(_normalize_input_for_openiti_parser(text))
     doc = ParsedDocument(title=title, author=author, meta=_extract_metadata(header_text))
-    external_blocks = _flatten_external_blocks(payload)
 
     parser_meta = payload.get("metadata") or {}
     if not doc.title and isinstance(parser_meta, dict):
@@ -338,167 +348,82 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
     if not doc.author and isinstance(parser_meta, dict):
         doc.author = str(parser_meta.get("author") or "").strip()
 
-    lines = body_text.splitlines()
-    para_lines: List[str] = []
-    title_lines: List[str] = []
-    seen_first_heading = False
+    _HEADING_MAP = {
+        1: BlockType.HEADING_1,
+        2: BlockType.HEADING_2,
+        3: BlockType.HEADING_3,
+        4: BlockType.HEADING_4,
+        5: BlockType.HEADING_5,
+    }
 
-    def flush_paragraph() -> None:
-        if not para_lines:
-            return
+    _EXTRA_CONTEXT_MAP = _OPENITI_EXTRA_CONTEXT
 
-        raw = " ".join(para_lines).strip()
-        para_lines.clear()
-        if not raw:
-            return
-
-        for match in PAGE_TAG.finditer(raw):
-            doc.blocks.append(_page_block(match))
-
-        cleaned = _strip_inline_markers(raw)
-        if not cleaned:
-            return
-
-        external_block = _pop_external_block(external_blocks, allowed_types=("paragraph", "verse", "category"))
-        if external_block and external_block.get("type") == "category":
-            doc.blocks.append(Block(BlockType.MORPHO_TAG, "", meta={"category": str(external_block.get("content") or "").strip()}))
-            return
-
-        doc.blocks.append(_block_from_external_context(raw, cleaned, external_block))
-
-    def absorb_title_lines() -> None:
-        nonlocal seen_first_heading
-        if seen_first_heading:
-            return
-        seen_first_heading = True
-        if not title_lines:
-            return
-        if not doc.title:
-            doc.title = title_lines[0]
-        if not doc.author and len(title_lines) > 1:
-            doc.author = title_lines[-1]
-        if len(title_lines) > 2:
-            doc.meta["subtitle"] = " — ".join(title_lines[1:-1])
-        title_lines.clear()
-
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            flush_paragraph()
+    for section in payload.get("content", []) or []:
+        if not isinstance(section, dict):
             continue
 
-        if line.startswith("######OpenITI") or line.startswith("#META#"):
-            continue
+        vol = section.get("volume")
+        page = section.get("page")
+        if isinstance(vol, int) and isinstance(page, int):
+            doc.blocks.append(Block(
+                BlockType.PAGE_REF, "",
+                meta={"vol": vol, "page": page},
+            ))
 
-        morpho = MORPHO_PAT.match(line)
-        if morpho:
-            flush_paragraph()
-            _pop_external_block(external_blocks, allowed_types=("category",))
-            doc.blocks.append(Block(BlockType.MORPHO_TAG, "", meta={"category": morpho.group(1)}))
-            continue
+        for ext_block in section.get("blocks", []) or []:
+            if not isinstance(ext_block, dict):
+                continue
 
-        admin = ADMIN_PAT.match(line)
-        if admin:
-            flush_paragraph()
-            doc.blocks.append(Block(BlockType.ADMIN_DIVISION, admin.group(2).strip(), meta={"admin_type": admin.group(1)}))
-            continue
+            btype = ext_block.get("type", "")
+            content = ext_block.get("content", "")
+            extra = ext_block.get("extraContext")
 
-        route = ROUTE_PAT.match(line)
-        if route:
-            flush_paragraph()
-            doc.blocks.append(Block(BlockType.ROUTE, route.group(2).strip(), meta={"route_type": route.group(1)}))
-            continue
+            # Normalize content to string
+            if isinstance(content, list):
+                content_parts = [str(c).strip() for c in content if str(c).strip()]
+            else:
+                content_parts = [str(content).strip()] if str(content).strip() else []
 
-        stripped = line.lstrip("# ").strip()
-        if stripped.startswith("PageV") and len(stripped) < 25:
-            page_match = PAGE_TAG.search(stripped)
-            if page_match:
-                if line.startswith("# "):
-                    doc.blocks.append(_page_block(page_match))
-                    flush_paragraph()
+            content_str = " ".join(content_parts)
+
+            if btype == "title":
+                doc.blocks.append(Block(BlockType.TITLE, content_str))
+
+            elif btype == "header":
+                level = int(ext_block.get("level") or 1)
+                doc.blocks.append(Block(
+                    _HEADING_MAP.get(level, BlockType.HEADING_5),
+                    content_str, level=level,
+                ))
+
+            elif btype == "verse":
+                if len(content_parts) == 2:
+                    doc.blocks.append(Block(
+                        BlockType.VERSE_PAIR, "",
+                        hemistich_a=content_parts[0],
+                        hemistich_b=content_parts[1],
+                    ))
                 else:
-                    flush_paragraph()
-                    doc.blocks.append(_page_block(page_match))
-                after = PAGE_TAG.sub("", stripped).strip()
-                if after:
-                    para_lines.append(after)
-                continue
+                    doc.blocks.append(Block(BlockType.VERSE_LINE, content_str))
 
-        if line.startswith("###"):
-            flush_paragraph()
-            absorb_title_lines()
+            elif btype == "category":
+                doc.blocks.append(Block(
+                    BlockType.MORPHO_TAG, "",
+                    meta={"category": content_str},
+                ))
 
-            if line.startswith("### |EDITOR|"):
-                _pop_external_block(external_blocks, allowed_types=("header",))
-                editorial_block = _pop_external_block(external_blocks, allowed_types=("paragraph",))
-                editorial_text = str((editorial_block or {}).get("content") or line.replace("### |EDITOR|", "", 1)).strip()
-                doc.blocks.append(Block(BlockType.EDITORIAL_SECTION, editorial_text))
-                continue
+            elif btype == "blockquote":
+                doc.blocks.append(_classify_content(content_str, ext_block))
 
-            external_block = _pop_external_block(external_blocks, allowed_types=("header", "paragraph"))
-            if external_block and external_block.get("type") == "header":
-                level = int(external_block.get("level") or 1)
-                heading_map = {
-                    1: BlockType.HEADING_1,
-                    2: BlockType.HEADING_2,
-                    3: BlockType.HEADING_3,
-                    4: BlockType.HEADING_4,
-                    5: BlockType.HEADING_5,
-                }
-                doc.blocks.append(Block(heading_map.get(level, BlockType.HEADING_5), str(external_block.get("content") or "").strip(), level=level))
-                continue
+            elif extra and extra in _EXTRA_CONTEXT_MAP:
+                doc.blocks.append(Block(_EXTRA_CONTEXT_MAP[extra], content_str))
 
-            if external_block:
-                content = str(external_block.get("content") or "").strip()
-                if content:
-                    doc.blocks.append(_block_from_external_context(line, content, external_block))
-                continue
-
-        if line.startswith("# "):
-            content = line[2:].strip()
-            if not content:
-                continue
-
-            if not seen_first_heading and not BASMALA_PAT.match(content) and not HAMDALA_PAT.match(content):
-                title_lines.append(content)
-                continue
-
-            flush_paragraph()
-
-            if HEMI_MARK.search(content):
-                verse_block = _pop_external_block(external_blocks, allowed_types=("verse",))
-                doc.blocks.append(_block_from_external_context(content, _strip_inline_markers(content), verse_block))
-                continue
-
-            para_lines.append(content)
-            continue
-
-        if line.startswith("~~"):
-            content = line[2:].strip()
-            if HEMI_MARK.search(content):
-                flush_paragraph()
-                verse_block = _pop_external_block(external_blocks, allowed_types=("verse",))
-                doc.blocks.append(_block_from_external_context(content, _strip_inline_markers(content), verse_block))
-                continue
-            para_lines.append(content)
-            continue
-
-        if HEMI_MARK.search(line):
-            flush_paragraph()
-            verse_block = _pop_external_block(external_blocks, allowed_types=("verse",))
-            doc.blocks.append(_block_from_external_context(line, _strip_inline_markers(line), verse_block))
-            continue
-
-        para_lines.append(line)
-
-    flush_paragraph()
-
-    if title_lines:
-        if not doc.title:
-            doc.title = title_lines[0]
-        if not doc.author and len(title_lines) > 1:
-            doc.author = title_lines[-1]
-        if len(title_lines) > 2:
-            doc.meta["subtitle"] = " — ".join(title_lines[1:-1])
+            else:
+                # Default: paragraph — apply inline classification
+                # Skip stray markup artifacts (lone #, empty content)
+                cleaned = _strip_inline_markers(content_str)
+                if not cleaned or cleaned in ("#", "##", "###"):
+                    continue
+                doc.blocks.append(_classify_content(content_str, ext_block))
 
     return doc

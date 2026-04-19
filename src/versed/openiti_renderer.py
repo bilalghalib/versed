@@ -364,16 +364,23 @@ def render_book(
                 pos_in_bytes = text_bytes.find(word_bytes, byte_offset)
                 if pos_in_bytes < 0:
                     continue
-                rect = layout.index_to_pos(pos_in_bytes)
+                # Get position of first char and end of last char
+                rect_start = layout.index_to_pos(pos_in_bytes)
+                end_byte = pos_in_bytes + len(word_bytes) - 1
+                rect_end = layout.index_to_pos(end_byte)
                 # Pango returns values in Pango units (1/1024 pixel)
-                px = rect.x / Pango.SCALE
-                py = rect.y / Pango.SCALE
-                pw = rect.width / Pango.SCALE
-                ph = rect.height / Pango.SCALE
-                # For RTL text, width can be negative
-                if pw < 0:
-                    px = px + pw
-                    pw = -pw
+                py = rect_start.y / Pango.SCALE
+                ph = rect_start.height / Pango.SCALE
+                # Compute word extent from start and end cursor positions
+                # For RTL, start.x > end.x; for LTR, start.x < end.x
+                edges = [
+                    rect_start.x / Pango.SCALE,
+                    (rect_start.x + rect_start.width) / Pango.SCALE,
+                    rect_end.x / Pango.SCALE,
+                    (rect_end.x + rect_end.width) / Pango.SCALE,
+                ]
+                px = min(edges)
+                pw = max(edges) - px
                 all_word_coords.append({
                     "text": word,
                     "x": origin_x + px,
