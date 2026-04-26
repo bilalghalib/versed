@@ -96,20 +96,21 @@ HONORIFIC_SYMBOLS = {
         'abbrev': 'SAW',
         'context': 'prophet',
     },
-    # U+FDFB - Arabic Ligature Jallajalalouhou (ﷻ for Allah - "جل جلاله")
+    # U+FDFB - Arabic Ligature Jallajalalouhou (ﷻ for Allah)
+    # Canonical spoken form: "Subhanahu wa Ta'ala" (سُبْحَانَهُ وَتَعَالَى)
     '\ufdfb': {
         'unicode': 'ﷻ',
-        'arabic': 'جَلَّ جَلَالُهُ',  # Jalla Jalaluhu - more commonly spoken
-        'transliteration': 'jalla jalaluhu',
-        'abbrev': 'JJ',
+        'arabic': 'سُبْحَانَهُ وَتَعَالَى',
+        'transliteration': 'subhanahu wa ta\'ala',
+        'abbrev': 'SWT',
         'context': 'god',
     },
-    # Azza wa Jall (عَزَّ وَجَلَّ) - alternative for Allah honorific
+    # Direct ﷻ character (same as U+FDFB)
     'ﷻ': {
         'unicode': 'ﷻ',
-        'arabic': 'عَزَّ وَجَلَّ',  # Azza wa Jall
-        'transliteration': 'azza wa jall',
-        'abbrev': 'AWJ',
+        'arabic': 'سُبْحَانَهُ وَتَعَالَى',
+        'transliteration': 'subhanahu wa ta\'ala',
+        'abbrev': 'SWT',
         'context': 'god',
     },
     # Direct ﷺ character (same as U+FDFA)
