@@ -8,6 +8,7 @@ typography, running headers, marginal page refs, and poetry layout.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -15,6 +16,20 @@ from .openiti_parser import ARABIC_CHAR, BlockType, ParsedDocument
 
 
 TATWEEL = "\u0640"
+LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
+PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
+_LTR_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\._/:()\[\]]*")
+
+
+def protect_ltr_runs(text: str) -> str:
+    """Wrap Latin/digit runs in BiDi isolates so they don't disturb RTL flow.
+
+    Mirrors the LRI/PDI strategy used in versed_core.rendering.pdf_renderer.
+    Idempotent \u2014 already-isolated runs aren't re-wrapped.
+    """
+    if not text or LRI in text:
+        return text
+    return _LTR_RUN.sub(lambda m: f"{LRI}{m.group(0)}{PDI}", text)
 NON_CONNECTING = set("اأإآدذرزوؤء")
 LAM_CHARS = set("لﻝﻞﻟ")
 ALIF_CHARS = set("اأإآﺍﺎﺃﺄﺇﺈﺁﺂ")
@@ -77,6 +92,37 @@ def apply_kashida(
                 updated = updated[:p] + TATWEEL + updated[p:]
         new_words.append(updated)
     return " ".join(new_words)
+
+
+def _per_line_kashida(
+    layout,
+    text: str,
+    target_w: float,
+    measure_fn: Callable[[str], float],
+    max_per_line: int,
+) -> str:
+    """Apply kashida to each Pango-laid line independently and return the
+    joined text with hard line breaks. Caller should set WrapMode.NONE before
+    re-applying the returned text to the layout.
+
+    Skips the last line of the paragraph (justifying the last line looks bad).
+    """
+    n = layout.get_line_count()
+    if n <= 0:
+        return text
+    text_bytes = text.encode("utf-8")
+    out: list[str] = []
+    for i in range(n):
+        line = layout.get_line_readonly(i)
+        start = line.start_index
+        length = line.length
+        line_text = text_bytes[start:start + length].decode("utf-8", "replace")
+        line_text = line_text.rstrip("\n")
+        is_last = i == n - 1
+        if not is_last and line_text.strip() and ARABIC_CHAR.search(line_text):
+            line_text = apply_kashida(line_text, target_w, measure_fn, max_per_line)
+        out.append(line_text)
+    return "\n".join(out)
 
 
 @dataclass
@@ -151,7 +197,8 @@ THEMES = {
         ornamental_chapters=False,
         running_headers=True,
         marginal_page_refs=True,
-        kashida=False,
+        kashida=True,
+        kashida_max=8,
     ),
     "literary": BookTheme(
         name="Literary Edition",
@@ -338,12 +385,20 @@ def render_book(
         track_words: bool = True,
     ) -> None:
         nonlocal y, current_block_index
+        if not centered:
+            text = protect_ltr_runs(text)
         layout = make_layout(font_size=font_size, bold=bold)
         layout.set_alignment(Pango.Alignment.CENTER if centered else Pango.Alignment.RIGHT)
-        layout.set_justify(justify and not centered)
-        if use_kashida and theme.kashida and not centered:
-            text = apply_kashida(text, tw(), lambda t: measure(t, font_size), theme.kashida_max)
+        layout.set_justify(False)
         layout.set_text(text, -1)
+        if use_kashida and theme.kashida and not centered:
+            text = _per_line_kashida(
+                layout, text, tw(),
+                lambda t: measure(t, font_size),
+                theme.kashida_max,
+            )
+            layout.set_wrap(Pango.WrapMode.NONE)
+            layout.set_text(text, -1)
         layout.set_line_spacing(theme.line_height)
         _, ext = layout.get_pixel_extents()
         spacing = spacing_after if spacing_after is not None else theme.size_body * 0.35
@@ -382,7 +437,7 @@ def render_book(
                 px = min(edges)
                 pw = max(edges) - px
                 all_word_coords.append({
-                    "text": word,
+                    "text": word.replace(LRI, "").replace(PDI, ""),
                     "x": origin_x + px,
                     "y": origin_y + py,
                     "width": pw,
