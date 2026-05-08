@@ -158,19 +158,54 @@ def _load_ocr_dependencies():
     return pytesseract, Image
 
 
+def extract_repaired_words(
+    page: Any,
+    *,
+    words_raw: Optional[List[Any]] = None,
+) -> List[Any]:
+    """Return PyMuPDF word tuples with all known font/ligature repairs applied.
+
+    Single source of truth for "raw words -> clean words" in the Versed
+    pipeline. Both the public ``versed`` extractor and the app-side
+    ``versed_core.extraction.pdf_extractor`` should call this helper instead
+    of repeating the repair sequence locally.
+
+    Pass ``words_raw`` when you've already extracted words (e.g. via OCR or
+    ``page.get_textpage_ocr().extractWORDS()``). When omitted, the helper
+    runs ``page.get_text("words")`` itself.
+
+    Pipeline (in order):
+      1. PyMuPDF native word extraction (skipped if ``words_raw`` is given).
+      2. Font-name-keyed character repair (Sabon family — see ``repair.py``).
+         Only applies to native extraction; OCR text doesn't carry font info.
+      3. Universal Latin ligature repair — Unicode FB0x normalization plus
+         the broken-CMap markers `|` -> ff and \\x7f -> fi. Applies to both
+         native and OCR words. See ``ligatures.py``.
+
+    Returns word tuples ``(x0, y0, x1, y1, text, block, line, word)``.
+    Caller maps tuples to its own dataclass.
+    """
+    if words_raw is None:
+        words_raw = page.get_text("words")
+    if not words_raw:
+        return []
+    # Sabon repair needs font spans from the page; OCR-pre-extracted words
+    # lack that context anyway, so it's safe to skip when font_spans empty.
+    font_spans = extract_repairable_font_spans(page)
+    if font_spans:
+        words_raw = repair_words_with_font_info(words_raw, font_spans)
+    return repair_words_for_dropped_ligatures(words_raw)
+
+
 def _extract_native_page_words(
     page: Any,
     page_number: int,
     decoder: QCFDecoder,
     page_type: PageType,
 ) -> List[AlignedWord]:
-    words_raw = page.get_text("words")
-    if not words_raw:
+    repaired_words = extract_repaired_words(page)
+    if not repaired_words:
         return []
-
-    font_spans = extract_repairable_font_spans(page)
-    repaired_words = repair_words_with_font_info(words_raw, font_spans)
-    repaired_words = repair_words_for_dropped_ligatures(repaired_words)
     qcf_font = _find_qcf_font_name(page)
 
     aligned_words: List[AlignedWord] = []

@@ -1,6 +1,6 @@
 """versed — local PDF-to-Markdown tooling for Arabic and bilingual texts."""
 
-__version__ = "1.2.2"
+__version__ = "1.2.4"
 
 from .arabic import (
     detect_batch_reversal,
@@ -23,7 +23,8 @@ from .detect import (
     detect_mojibake,
     detect_mojibake_in_pdf,
 )
-from .extract import ExtractResult, extract_document
+from .extract import ExtractResult, extract_document, extract_repaired_words
+from .ligatures import expand_dropped_ligatures, repair_words_for_dropped_ligatures
 from .health import summarize_text_health
 from .honorifics import (
     HONORIFIC_SYMBOLS,
@@ -148,6 +149,9 @@ __all__ = [
     "document_from_structured",
     "expand_honorifics",
     "extract_document",
+    "extract_repaired_words",
+    "expand_dropped_ligatures",
+    "repair_words_for_dropped_ligatures",
     "extract_qcf_page_number",
     "extract_repairable_font_spans",
     "find_font_for_word",
