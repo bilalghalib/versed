@@ -27,8 +27,31 @@ def test_pipe_outside_word_left_alone():
     assert expand_dropped_ligatures("a | b") == "a | b"
     assert expand_dropped_ligatures("p. 159 | OUP") == "p. 159 | OUP"
     assert expand_dropped_ligatures("|table|") == "|table|"
-    assert expand_dropped_ligatures("a|") == "a|"
     assert expand_dropped_ligatures("|a") == "|a"
+
+
+def test_pipe_at_word_end_repaired():
+    """The `ff` glyph drops to `|` and may sit at the end of a word
+    when the trailing letters were dropped (`off` -> `o|`).
+
+    Observed in the OUP/Sheibani PDF, page 3:
+      'fathers can marry o| their minor children'
+      'agnatic kin to whom guardianship would devolve from marrying o|'
+    """
+    assert expand_dropped_ligatures("o|") == "off"
+    assert expand_dropped_ligatures("o|,") == "off,"
+    assert expand_dropped_ligatures("o|.") == "off."
+    assert expand_dropped_ligatures("o| their") == "off their"
+
+
+def test_pipe_in_paragraph_with_separators_handles_both():
+    """A paragraph that mixes a real ligature corruption AND a
+    separator pipe must repair the corruption and leave the separator
+    alone. The separator looks like ``|table|`` (region starts with
+    `|`)."""
+    src = "Jurists di|ered. See |table| below. He had no o|."
+    expected = "Jurists differed. See |table| below. He had no off."
+    assert expand_dropped_ligatures(src) == expected
 
 
 # --- \x7f → fi -----------------------------------------------------------
@@ -38,6 +61,44 @@ def test_del_marker_becomes_fi():
     assert expand_dropped_ligatures("\x7fxed") == "fixed"
     assert expand_dropped_ligatures("\x7frst") == "first"
     assert expand_dropped_ligatures("\x7ffteenth-century") == "fifteenth-century"
+
+
+def test_del_marker_between_accented_latin_and_translit_marks():
+    """The `fi` glyph drops to `\\x7f` even inside transliterated tokens
+    that use accented Latin and modifier marks. Without this, words
+    like ``Shāfiʿīs`` come back as ``Shā\\x7fʿīs`` and stay broken.
+
+    Observed in the OUP/Sheibani PDF, page 3:
+      'According to Shā\\x7fʿīs, ...'
+    """
+    assert expand_dropped_ligatures("Shā\x7fʿīs") == "Shāfiʿīs"
+    assert expand_dropped_ligatures("Shā\x7fʿīs,") == "Shāfiʿīs,"
+
+
+def test_is_latinish_word_char_recognizes_full_alphabet():
+    from versed.ligatures import is_latinish_word_char
+    # ASCII
+    assert is_latinish_word_char("a")
+    assert is_latinish_word_char("Z")
+    # Latin-1 / Extended-A
+    assert is_latinish_word_char("ā")
+    assert is_latinish_word_char("é")
+    assert is_latinish_word_char("ñ")
+    # Latin Extended Additional
+    assert is_latinish_word_char("ḥ")
+    assert is_latinish_word_char("ṣ")
+    assert is_latinish_word_char("ṭ")
+    # Modifier marks
+    assert is_latinish_word_char("ʿ")
+    assert is_latinish_word_char("ʾ")
+    # Curly apostrophes
+    assert is_latinish_word_char("'")
+    assert is_latinish_word_char("'")
+    # Negative cases
+    assert not is_latinish_word_char("|")
+    assert not is_latinish_word_char(" ")
+    assert not is_latinish_word_char("ا")  # Arabic alef
+    assert not is_latinish_word_char("")
 
 
 def test_del_marker_at_word_end_also_repaired():

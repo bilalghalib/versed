@@ -166,6 +166,9 @@ class BookTheme:
     color_lacuna: Tuple[float, float, float] = (0.60, 0.40, 0.40)
     color_morpho: Tuple[float, float, float] = (0.40, 0.40, 0.40)
     color_admin: Tuple[float, float, float] = (0.25, 0.30, 0.20)
+    color_apparatus: Tuple[float, float, float] = (0.42, 0.38, 0.34)
+    footnote_area_height: float = 92.0
+    footnote_max_chars: int = 900
     kashida: bool = True
     kashida_max: int = 10
     running_headers: bool = True
@@ -186,8 +189,8 @@ THEMES = {
         size_basmala=13,
         size_verse=11,
         line_height=1.35,
-        margin_inner=90,
-        margin_outer=60,
+        margin_inner=75,
+        margin_outer=75,
         margin_top=70,
         margin_bottom=65,
         color_body=(0.10, 0.10, 0.10),
@@ -197,7 +200,7 @@ THEMES = {
         ornamental_chapters=False,
         running_headers=True,
         marginal_page_refs=True,
-        kashida=True,
+        kashida=False,
         kashida_max=8,
     ),
     "literary": BookTheme(
@@ -311,6 +314,7 @@ def render_book(
     current_section = ""
     all_word_coords: list[dict] = []
     current_block_index = 0
+    pending_apparatus_notes: list[str] = []
 
     def ml() -> float:
         return theme.margin_inner if page_num % 2 == 0 else theme.margin_outer
@@ -338,36 +342,104 @@ def render_book(
         _, ext = layout.get_pixel_extents()
         return ext.width
 
+    def render_pending_apparatus_notes() -> None:
+        if page_num <= 0 or not pending_apparatus_notes:
+            return
+        notes = [note.strip() for note in pending_apparatus_notes if note.strip()]
+        if not notes:
+            pending_apparatus_notes.clear()
+            return
+
+        font_size = max(7, theme.size_body - 3)
+        rule_y = H - theme.margin_bottom - theme.footnote_area_height + 8
+        text_y = rule_y + 8
+        max_note_h = max(18, (H - theme.margin_bottom / 2 - 8) - text_y)
+
+        selected: list[str] = []
+        remaining = list(notes)
+        layout = make_layout(font_size=font_size, width=tw())
+        layout.set_alignment(Pango.Alignment.LEFT)
+        layout.set_justify(False)
+        layout.set_line_spacing(1.15)
+
+        while remaining:
+            candidate_notes = selected + [remaining[0]]
+            combined = " \u2022 ".join(candidate_notes)
+            if len(combined) > theme.footnote_max_chars:
+                combined = combined[:theme.footnote_max_chars].rstrip() + "..."
+            layout.set_text(protect_ltr_runs(combined), -1)
+            _, ext = layout.get_pixel_extents()
+            if ext.height <= max_note_h:
+                selected.append(remaining.pop(0))
+                continue
+            if not selected:
+                clipped = remaining.pop(0)
+                lo, hi = 1, min(len(clipped), theme.footnote_max_chars)
+                best = ""
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    trial = clipped[:mid].rstrip() + "..."
+                    layout.set_text(protect_ltr_runs(trial), -1)
+                    _, trial_ext = layout.get_pixel_extents()
+                    if trial_ext.height <= max_note_h:
+                        best = trial
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                selected.append(best or "...")
+            break
+
+        combined = " \u2022 ".join(selected)
+        if remaining:
+            combined = combined.rstrip() + " ..."
+
+        cr.set_source_rgb(*theme.color_apparatus)
+        cr.set_line_width(0.25)
+        cr.move_to(ml(), rule_y)
+        cr.line_to(ml() + tw() * 0.38, rule_y)
+        cr.stroke()
+
+        layout.set_text(protect_ltr_runs(combined), -1)
+        cr.move_to(ml(), text_y)
+        PangoCairo.show_layout(cr, layout)
+        pending_apparatus_notes[:] = remaining
+
+    def decorate_current_page() -> None:
+        if page_num <= 0:
+            return
+        render_pending_apparatus_notes()
+        num_str = str(page_num).translate(W2E)
+        cr.set_source_rgb(*theme.color_ornament)
+        num_layout = make_layout(font_size=theme.size_page_num, width=W)
+        num_layout.set_alignment(Pango.Alignment.CENTER)
+        num_layout.set_text(num_str, -1)
+        cr.move_to(0, H - theme.margin_bottom / 2)
+        PangoCairo.show_layout(cr, num_layout)
+        if theme.running_headers and current_chapter:
+            cr.set_source_rgb(*theme.color_running_header)
+            header_layout = make_layout(font_size=theme.size_running_header, width=tw())
+            header_text = current_section or current_chapter
+            if len(header_text) > 60:
+                header_text = header_text[:57] + "..."
+            header_layout.set_alignment(Pango.Alignment.CENTER)
+            header_layout.set_text(header_text, -1)
+            cr.move_to(ml(), theme.margin_top - 30)
+            PangoCairo.show_layout(cr, header_layout)
+            cr.set_line_width(0.3)
+            cr.move_to(ml(), theme.margin_top - 8)
+            cr.line_to(ml() + tw(), theme.margin_top - 8)
+            cr.stroke()
+
     def new_page() -> None:
         nonlocal y, page_num
         if page_num > 0:
-            num_str = str(page_num).translate(W2E)
-            cr.set_source_rgb(*theme.color_ornament)
-            num_layout = make_layout(font_size=theme.size_page_num, width=W)
-            num_layout.set_alignment(Pango.Alignment.CENTER)
-            num_layout.set_text(num_str, -1)
-            cr.move_to(0, H - theme.margin_bottom / 2)
-            PangoCairo.show_layout(cr, num_layout)
-            if theme.running_headers and current_chapter:
-                cr.set_source_rgb(*theme.color_running_header)
-                header_layout = make_layout(font_size=theme.size_running_header, width=tw())
-                header_text = current_section or current_chapter
-                if len(header_text) > 60:
-                    header_text = header_text[:57] + "..."
-                header_layout.set_alignment(Pango.Alignment.CENTER)
-                header_layout.set_text(header_text, -1)
-                cr.move_to(ml(), theme.margin_top - 30)
-                PangoCairo.show_layout(cr, header_layout)
-                cr.set_line_width(0.3)
-                cr.move_to(ml(), theme.margin_top - 8)
-                cr.line_to(ml() + tw(), theme.margin_top - 8)
-                cr.stroke()
+            decorate_current_page()
         cr.show_page()
         page_num += 1
         y = theme.margin_top
 
     def max_y() -> float:
-        return H - theme.margin_bottom - 55
+        return H - theme.margin_bottom - theme.footnote_area_height
 
     def check_space(needed: float) -> None:
         if y + needed > max_y():
@@ -388,7 +460,12 @@ def render_book(
         if not centered:
             text = protect_ltr_runs(text)
         layout = make_layout(font_size=font_size, bold=bold)
-        layout.set_alignment(Pango.Alignment.CENTER if centered else Pango.Alignment.RIGHT)
+        # In Pango's bidirectional layout, LEFT aligns RTL text to the physical
+        # right edge of the layout box; RIGHT sends it to the physical left.
+        layout.set_alignment(Pango.Alignment.CENTER if centered else Pango.Alignment.LEFT)
+        # Native Pango justification expands Arabic spaces unevenly and makes
+        # mixed editorial apparatus look jagged. Keep body blocks flush-right
+        # and leave true justification to a later shaping pass.
         layout.set_justify(False)
         layout.set_text(text, -1)
         if use_kashida and theme.kashida and not centered:
@@ -555,7 +632,28 @@ def render_book(
             i += 1
             continue
 
-        if block.type == BlockType.HEADING_1:
+        if block.type == BlockType.TITLE:
+            if prev and prev != BlockType.PAGE_REF:
+                y += theme.size_body * 1.6
+            is_book_title = block.text.strip().startswith("كتاب ")
+            size = theme.size_h1 if is_book_title else theme.size_h2
+            check_space(65 if is_book_title else 45)
+            if is_book_title:
+                current_chapter = block.text
+                current_section = ""
+            else:
+                current_section = block.text
+            draw_text(
+                block.text,
+                font_size=size,
+                color=theme.color_heading,
+                centered=True,
+                bold=True,
+                spacing_after=10,
+                track_words=False,
+            )
+
+        elif block.type == BlockType.HEADING_1:
             if prev and prev != BlockType.PAGE_REF:
                 y += theme.size_body * 2
             check_space(80)
@@ -725,6 +823,9 @@ def render_book(
                 spacing_after=8,
             )
 
+        elif block.type == BlockType.APPARATUS_NOTE:
+            pending_apparatus_notes.append(block.text)
+
         elif block.type == BlockType.MORPHO_TAG:
             cat = block.meta.get("category", "?")
             draw_text(
@@ -774,13 +875,7 @@ def render_book(
         if block.type not in (BlockType.PAGE_REF, BlockType.MILESTONE):
             current_block_index += 1
 
-    num = str(page_num).translate(W2E)
-    cr.set_source_rgb(*theme.color_ornament)
-    num_layout = make_layout(font_size=theme.size_page_num, width=W)
-    num_layout.set_alignment(Pango.Alignment.CENTER)
-    num_layout.set_text(num, -1)
-    cr.move_to(0, H - theme.margin_bottom / 2)
-    PangoCairo.show_layout(cr, num_layout)
+    decorate_current_page()
 
     surface.finish()
 

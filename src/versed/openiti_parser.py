@@ -48,6 +48,7 @@ class BlockType(Enum):
     DIC_BOOK = "dict_book_title"
     DOX_POSITION = "dox_theological_position"
     DOX_SECT = "dox_religious_sect"
+    APPARATUS_NOTE = "apparatus_note"
     MORPHO_TAG = "morphological_passage"
     ADMIN_DIVISION = "administrative_division"
     ROUTE = "route_distance"
@@ -103,6 +104,9 @@ class ParsedDocument:
 PAGE_TAG = re.compile(r"\bPageV(\d+)P(\d+)\b")
 MS_TAG = re.compile(r"\bms\d+\b|\b\d+ms\b")
 MILESTONE = re.compile(r"\bMilestone\d+\b")
+APPARATUS_SEP = re.compile(r"\s+\+\s+")
+APPARATUS_START = re.compile(r"^(?:حديث|أثر|تنبيه|قلت|قال المحقق)\b")
+INLINE_TITLE_SEP = re.compile(r"\s+\$\s+")
 HEMI_MARK = re.compile(r"[%\u066a]\s*~\s*[%\u066a]")
 META_END = "#META#Header#End#"
 BASMALA_PAT = re.compile(r"^بسم الله الرحمن الرحيم\s*$")
@@ -241,6 +245,13 @@ def _strip_inline_markers(text: str) -> str:
     cleaned = PAGE_TAG.sub("", text)
     cleaned = MS_TAG.sub("", cleaned)
     cleaned = MILESTONE.sub("", cleaned)
+    cleaned = re.sub(r"\s+\+\s*$", "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
+
+
+def _strip_visible_markup(text: str) -> str:
+    cleaned = _strip_inline_markers(text)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
 
@@ -328,6 +339,87 @@ def _classify_content(text: str, ext_block: Optional[Dict[str, Any]] = None) -> 
     return _block_from_external_context(text, cleaned, ext_block)
 
 
+def _split_apparatus(text: str, ext_block: Optional[Dict[str, Any]] = None) -> List[Block]:
+    """Split OpenITI inline apparatus separated with `` + `` into layout blocks.
+
+    In many OpenITI texts, ``+`` marks a secondary note stream (for example
+    takhrij / source notes) inside the same paragraph. Treating it as body text
+    causes bad justification and makes source apparatus look like authorial
+    prose. The separator is only recognized with surrounding whitespace so
+    ordinary plus signs remain visible text.
+    """
+    parts = [part.strip() for part in APPARATUS_SEP.split(text) if part.strip()]
+    if not parts:
+        return []
+
+    blocks: List[Block] = []
+    for part in parts:
+        cleaned_part = _strip_visible_markup(part)
+        if not cleaned_part:
+            continue
+        if APPARATUS_START.match(cleaned_part):
+            blocks.append(Block(
+                BlockType.APPARATUS_NOTE,
+                cleaned_part,
+                meta={"marker": "+"},
+            ))
+        else:
+            blocks.append(_block_from_external_context(text, cleaned_part, ext_block))
+    return blocks
+
+
+def _split_inline_titles_and_apparatus(
+    text: str,
+    ext_block: Optional[Dict[str, Any]] = None,
+) -> List[Block]:
+    """Split inline OpenITI title separators before apparatus classification."""
+    parts = [part.strip() for part in INLINE_TITLE_SEP.split(text) if part.strip()]
+    if not parts:
+        return []
+
+    blocks: List[Block] = []
+    blocks.extend(_split_apparatus(parts[0], ext_block))
+    for part in parts[1:]:
+        cleaned_part = _strip_visible_markup(part)
+        if cleaned_part:
+            blocks.append(Block(
+                BlockType.TITLE,
+                cleaned_part,
+                level=2,
+                meta={"marker": "$"},
+            ))
+    return blocks
+
+
+def _layout_blocks_from_content(text: str, ext_block: Optional[Dict[str, Any]] = None) -> List[Block]:
+    """Convert one parser content payload into ordered layout blocks.
+
+    This is the book-agnostic source cleanup layer: page refs become structural
+    marginal markers, milestones are removed from visible prose, and inline
+    apparatus is separated from body text before rendering.
+    """
+    blocks: List[Block] = []
+    cursor = 0
+
+    for match in PAGE_TAG.finditer(text):
+        before = text[cursor:match.start()].strip()
+        if before:
+            blocks.extend(_split_inline_titles_and_apparatus(before, ext_block))
+        blocks.append(_page_block(match))
+        cursor = match.end()
+
+    rest = text[cursor:].strip()
+    if rest:
+        blocks.extend(_split_inline_titles_and_apparatus(rest, ext_block))
+
+    if not blocks:
+        cleaned = _strip_visible_markup(text)
+        if cleaned:
+            blocks.append(_block_from_external_context(text, cleaned, ext_block))
+
+    return [block for block in blocks if block.text or block.type == BlockType.PAGE_REF]
+
+
 def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocument:
     """Parse OpenITI mARkdown via @openiti/markdown-parser.
 
@@ -413,10 +505,12 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 ))
 
             elif btype == "blockquote":
-                doc.blocks.append(_classify_content(content_str, ext_block))
+                doc.blocks.extend(_layout_blocks_from_content(content_str, ext_block))
 
             elif extra and extra in _EXTRA_CONTEXT_MAP:
-                doc.blocks.append(Block(_EXTRA_CONTEXT_MAP[extra], content_str))
+                cleaned = _strip_visible_markup(content_str)
+                if cleaned:
+                    doc.blocks.append(Block(_EXTRA_CONTEXT_MAP[extra], cleaned))
 
             else:
                 # Default: paragraph — apply inline classification
@@ -424,6 +518,6 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 cleaned = _strip_inline_markers(content_str)
                 if not cleaned or cleaned in ("#", "##", "###"):
                     continue
-                doc.blocks.append(_classify_content(content_str, ext_block))
+                doc.blocks.extend(_layout_blocks_from_content(content_str, ext_block))
 
     return doc
