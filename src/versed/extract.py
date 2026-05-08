@@ -10,6 +10,7 @@ from .arabic import is_arabic
 from .classify import PageType, classify_page, select_backend
 from .filtering import filter_spurious_tokens
 from .honorifics import decode_honorific, normalize_text
+from .ligatures import repair_words_for_dropped_ligatures
 from .markdown import BUILDER_VERSION, build_enhanced_markdown
 from .qcf import QCFDecoder, is_qcf_text
 from .repair import extract_repairable_font_spans, repair_words_with_font_info
@@ -169,6 +170,7 @@ def _extract_native_page_words(
 
     font_spans = extract_repairable_font_spans(page)
     repaired_words = repair_words_with_font_info(words_raw, font_spans)
+    repaired_words = repair_words_for_dropped_ligatures(repaired_words)
     qcf_font = _find_qcf_font_name(page)
 
     aligned_words: List[AlignedWord] = []
