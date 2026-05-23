@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import html as html_lib
-import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from .arabic import is_arabic
+from ._structured_text import collapse_whitespace, html_to_text, strip_markdown_inline
 from .types import AlignedWord, BlockType, Document, TextBlock
 
 
@@ -124,7 +123,7 @@ def document_from_markdown(
             continue
         if line.lstrip().startswith("#"):
             flush_paragraph()
-            heading = re.sub(r"^#+\s*", "", line).strip()
+            heading = line.lstrip().lstrip("#").lstrip()
             heading = _clean_text(_strip_markdown_inline(heading))
             if heading:
                 blocks.append(TextBlock(type=BlockType.HEADING, text=heading))
@@ -264,25 +263,15 @@ def _fallback_text_from_marker(data: Any) -> str:
 
 
 def _html_to_text(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r"<content-ref[^>]*>", " ", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = html_lib.unescape(text)
-    return _clean_text(text)
+    return _clean_text(html_to_text(text))
 
 
 def _strip_markdown_inline(text: str) -> str:
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"!\[[^\]]*\]\([^\)]*\)", " ", text)
-    text = re.sub(r"\[([^\]]+)\]\([^\)]*\)", r"\1", text)
-    text = re.sub(r"[*_~]+", "", text)
-    return text.strip()
+    return strip_markdown_inline(text)
 
 
 def _clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    return collapse_whitespace(text)
 
 
 def _detect_language(text: str) -> str:

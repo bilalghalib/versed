@@ -1,11 +1,17 @@
 """Tests for public layout and markdown builders."""
 
+from versed._structured_text import html_to_text, strip_markdown_inline
 from versed.layout import document_from_aligned_words
 from versed.markdown import build_enhanced_markdown
 from versed.types import AlignedWord, BlockType
 
 
 class TestLayoutAndMarkdown:
+    def test_structured_text_helpers_avoid_tag_regex_edge_cases(self):
+        html = '<p>Hello <a title="2 > 1">world</a>&nbsp;again.</p>'
+        assert html_to_text(html) == "Hello world again."
+        assert strip_markdown_inline("[Label](https://example.com/a_(b)) ![alt](x)") == "Label"
+
     def test_quran_words_become_verse_block(self):
         words = [
             AlignedWord(
