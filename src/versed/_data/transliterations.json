@@ -1,10 +1,14 @@
 {
   "words": {
     "prophet": "النبي",
+    "god": "الله",
     "allah": "الله",
     "quran": "القرآن",
     "qur'an": "القرآن",
     "hadith": "حديث",
+    "ḥadīth": "حديث",
+    "hadiths": "أحاديث",
+    "ḥadīths": "أحاديث",
     "sunnah": "سنة",
     "surah": "سورة",
     "sura": "سورة",
@@ -29,6 +33,12 @@
     "al-nur": "النور",
     "al-furqan": "الفرقان",
     "ya-sin": "يس",
+    "qalb": "قلب",
+    "al-qalb": "القلب",
+    "hudur": "حضور",
+    "ḥuḍūr": "حضور",
+    "hudur al-qalb": "حضور القلب",
+    "ḥuḍūr al-qalb": "حضور القلب",
     "al-rahman": "الرحمن",
     "al-mulk": "الملك",
     "al-qalam": "القلم"

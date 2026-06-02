@@ -160,6 +160,7 @@ def _load_transliterations() -> Tuple[Dict[str, str], Dict[str, str]]:
 
 # Minimal fallback transliterations (only used if Claude enrichment unavailable)
 TRANSLITERATIONS, TRANSLITERATION_PREFIXES = _load_transliterations()
+_ATTACHED_REFERENCE_DIGITS_RE = re.compile(r"^\d+|\d+$")
 
 
 @dataclass
@@ -217,10 +218,13 @@ def find_transliteration(word: str) -> Optional[str]:
     if normalized in TRANSLITERATIONS:
         return TRANSLITERATIONS[normalized]
 
-    # Check if word contains a transliteration (e.g., "(Al-Jathiyah," )
-    for translit, arabic in TRANSLITERATIONS.items():
-        if translit and translit in normalized:
-            return arabic
+    # PDF extraction can attach a superscript footnote number to the token.
+    # Strip only those edge digits and retry the exact lookup. Arbitrary
+    # substring matches are unsafe: a known inner word such as ``qalb`` must
+    # not replace the larger phrase ``hudūr al-qalb``.
+    without_reference_digits = _ATTACHED_REFERENCE_DIGITS_RE.sub("", normalized).strip()
+    if without_reference_digits in TRANSLITERATIONS:
+        return TRANSLITERATIONS[without_reference_digits]
 
     return None
 

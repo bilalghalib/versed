@@ -103,9 +103,12 @@ class TestTransliterations:
         assert find_transliteration("al-fatiha") == "الفاتحة"
         assert find_transliteration("al-jathiyah") == "الجاثية"
 
-    def test_find_partial_match(self):
+    def test_find_normalized_match(self):
         arabic = find_transliteration("(Al-Jathiyah,")
         assert arabic == "الجاثية"
+
+    def test_find_rejects_inner_word_match(self):
+        assert find_transliteration("not-qalb") is None
 
     def test_not_found(self):
         assert find_transliteration("unknown_word_xyz") is None
