@@ -22,6 +22,7 @@ class TestCLI:
             stats={"unsupported_pages": [1]},
         )
         monkeypatch.setattr("versed.extract.extract_document", lambda *args, **kwargs: fake_result)
+        monkeypatch.setattr("versed.cli._validate_input_path", lambda _path: True)
 
         exit_code = cmd_extract(
             Namespace(
