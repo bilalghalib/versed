@@ -87,6 +87,34 @@ PageV01P001
     assert doc.blocks[3].text == "وتتمة الصفحة"
 
 
+def test_parse_openiti_uses_header_metadata_for_front_matter():
+    raw = """######OpenITI#
+#META# 010.AuthorNAME :: ابن خلكان
+#META# 020.BookTITLE :: وفيات الأعيان
+#META#Header#End#
+
+# متن الكتاب
+"""
+
+    doc = parse_openiti(raw)
+
+    assert doc.title == "وفيات الأعيان"
+    assert doc.author == "ابن خلكان"
+
+
+def test_parse_openiti_keeps_authorial_qala_as_body_text():
+    raw = """######OpenITI#
+#META#Header#End#
+
+# قلت: وأين الأقاح قال لنا
+"""
+
+    doc = parse_openiti(raw)
+
+    assert [block.type for block in doc.blocks] == [BlockType.PARAGRAPH]
+    assert doc.blocks[0].text == "قلت: وأين الأقاح قال لنا"
+
+
 def test_parse_openiti_splits_inline_title_markers():
     raw = """######OpenITI#
 #META#Header#End#

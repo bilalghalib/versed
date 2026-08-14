@@ -135,7 +135,17 @@ _OPENITI_EXTRA_CONTEXT = {
     "dictionary_bib": BlockType.DIC_BOOK,
     "dox_pos": BlockType.DOX_POSITION,
     "dox_sec": BlockType.DOX_SECT,
+    "editorial": BlockType.APPARATUS_NOTE,
 }
+
+
+def _usable_metadata_value(meta: Dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = str(meta.get(key) or "").strip()
+        if value and value.upper() not in {"NODATA", "NOTGIVEN"}:
+            return value
+    return ""
+
 
 _NODE_OPENITI_PARSER = r"""
 const { parseMarkdown } = require('@openiti/markdown-parser');
@@ -353,11 +363,11 @@ def _split_apparatus(text: str, ext_block: Optional[Dict[str, Any]] = None) -> L
         return []
 
     blocks: List[Block] = []
-    for part in parts:
+    for index, part in enumerate(parts):
         cleaned_part = _strip_visible_markup(part)
         if not cleaned_part:
             continue
-        if APPARATUS_START.match(cleaned_part):
+        if index > 0 and APPARATUS_START.match(cleaned_part):
             blocks.append(Block(
                 BlockType.APPARATUS_NOTE,
                 cleaned_part,
@@ -432,13 +442,18 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
         header_text, _ = text.split(META_END, 1)
 
     payload = _run_external_openiti_parser(_normalize_input_for_openiti_parser(text))
-    doc = ParsedDocument(title=title, author=author, meta=_extract_metadata(header_text))
+    header_meta = _extract_metadata(header_text)
+    doc = ParsedDocument(title=title, author=author, meta=header_meta)
 
     parser_meta = payload.get("metadata") or {}
     if not doc.title and isinstance(parser_meta, dict):
-        doc.title = str(parser_meta.get("title") or "").strip()
+        doc.title = _usable_metadata_value(parser_meta, "title")
     if not doc.author and isinstance(parser_meta, dict):
-        doc.author = str(parser_meta.get("author") or "").strip()
+        doc.author = _usable_metadata_value(parser_meta, "author")
+    if not doc.title:
+        doc.title = _usable_metadata_value(header_meta, "020.BookTITLE", "020.BookTITLESUB")
+    if not doc.author:
+        doc.author = _usable_metadata_value(header_meta, "010.AuthorNAME", "010.AuthorAKA")
 
     _HEADING_MAP = {
         1: BlockType.HEADING_1,

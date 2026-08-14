@@ -8,7 +8,9 @@ typography, running headers, marginal page refs, and poetry layout.
 from __future__ import annotations
 
 import math
+import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -18,7 +20,14 @@ from .openiti_parser import ARABIC_CHAR, BlockType, ParsedDocument
 TATWEEL = "\u0640"
 LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
 PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
-_LTR_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\._/:()\[\]]*")
+# An optional OPENING bracket is part of the run. Without it, a footnote
+# reference like "(2)" matches only from the digit -- so the closing paren
+# lands inside the isolate while the opening one stays outside. That splits
+# the pair across a direction boundary, and the bidi algorithm then mirrors
+# and reorders them, visually gluing the marker to the neighbouring Arabic
+# word ("ربيعة (2) بن" rendering as "ربي)(2)بن").
+_LTR_RUN = re.compile(r"[(\[]?[A-Za-z0-9][A-Za-z0-9\-\._/:()\[\]]*")
+_ENTRY_NUMBER = re.compile(r"^(\d+)(\s*-\s*)")
 
 
 def protect_ltr_runs(text: str) -> str:
@@ -30,6 +39,27 @@ def protect_ltr_runs(text: str) -> str:
     if not text or LRI in text:
         return text
     return _LTR_RUN.sub(lambda m: f"{LRI}{m.group(0)}{PDI}", text)
+
+
+def _configure_pango_backend(
+    platform: str = sys.platform,
+    environ: Optional[Dict[str, str]] = None,
+) -> None:
+    """Use Fontconfig on macOS so Cairo preserves shaped glyph positions."""
+    env = os.environ if environ is None else environ
+    if platform == "darwin":
+        env.setdefault("PANGOCAIRO_BACKEND", "fc")
+
+
+def _format_entry_heading(text: str) -> str:
+    """Use Arabic-Indic digits for entry ordinals in Arabic headings."""
+    return _ENTRY_NUMBER.sub(
+        lambda match: f"{match.group(1).translate(W2E)}{match.group(2)}",
+        text,
+        count=1,
+    )
+
+
 NON_CONNECTING = set("اأإآدذرزوؤء")
 LAM_CHARS = set("لﻝﻞﻟ")
 ALIF_CHARS = set("اأإآﺍﺎﺃﺄﺇﺈﺁﺂ")
@@ -295,6 +325,7 @@ def render_book(
     cover_renderer: Optional[Callable[[Any, float, float, dict, str], None]] = None,
 ) -> Dict[str, Any]:
     """Render an OpenITI parsed document to PDF using Pango/Cairo."""
+    _configure_pango_backend()
     import cairo
     import gi
 
@@ -399,7 +430,8 @@ def render_book(
         cr.line_to(ml() + tw() * 0.38, rule_y)
         cr.stroke()
 
-        layout.set_text(protect_ltr_runs(combined), -1)
+        protected_combined = protect_ltr_runs(combined)
+        layout.set_text(protected_combined, -1)
         cr.move_to(ml(), text_y)
         PangoCairo.show_layout(cr, layout)
         pending_apparatus_notes[:] = remaining
@@ -455,6 +487,8 @@ def render_book(
         spacing_after: Optional[float] = None,
         use_kashida: bool = False,
         track_words: bool = True,
+        _allow_split: bool = True,
+        _word_index_offset: int = 0,
     ) -> None:
         nonlocal y, current_block_index
         if not centered:
@@ -479,6 +513,72 @@ def render_book(
         layout.set_line_spacing(theme.line_height)
         _, ext = layout.get_pixel_extents()
         spacing = spacing_after if spacing_after is not None else theme.size_body * 0.35
+
+        overflows_page = y + ext.height + spacing > max_y()
+        full_page_height = max_y() - theme.margin_top
+        if (
+            _allow_split
+            and overflows_page
+            and ext.height + spacing <= full_page_height
+            and y > theme.margin_top
+        ):
+            # A block that fits on a fresh page should stay intact. Using the
+            # final line or two of the current page creates widows that are
+            # especially conspicuous in short Arabic biographical entries.
+            new_page()
+            overflows_page = False
+
+        if _allow_split and overflows_page:
+            encoded = text.encode("utf-8")
+            lines = [
+                encoded[line.start_index:line.start_index + line.length].decode("utf-8")
+                for line in layout.get_lines_readonly()
+            ]
+            if len(lines) > 1:
+                chunks: list[str] = []
+                pending: list[str] = []
+                available = max_y() - y
+
+                for line_text in lines:
+                    candidate = "\n".join([*pending, line_text])
+                    candidate_layout = make_layout(font_size=font_size, bold=bold)
+                    candidate_layout.set_alignment(
+                        Pango.Alignment.CENTER if centered else Pango.Alignment.LEFT
+                    )
+                    candidate_layout.set_justify(False)
+                    candidate_layout.set_line_spacing(theme.line_height)
+                    candidate_layout.set_text(candidate, -1)
+                    _, candidate_ext = candidate_layout.get_pixel_extents()
+                    if pending and candidate_ext.height > available:
+                        chunks.append("\n".join(pending))
+                        pending = [line_text]
+                        available = max_y() - theme.margin_top
+                    else:
+                        pending.append(line_text)
+                if pending:
+                    chunks.append("\n".join(pending))
+
+                word_offset = _word_index_offset
+                for chunk_index, chunk in enumerate(chunks):
+                    if chunk_index > 0:
+                        new_page()
+                    is_last = chunk_index == len(chunks) - 1
+                    draw_text(
+                        chunk,
+                        font_size=font_size,
+                        color=color,
+                        centered=centered,
+                        bold=bold,
+                        justify=justify,
+                        spacing_after=spacing if is_last else 0,
+                        use_kashida=False,
+                        track_words=track_words,
+                        _allow_split=False,
+                        _word_index_offset=word_offset,
+                    )
+                    word_offset += len(chunk.split())
+                return
+
         check_space(ext.height + spacing)
         if y + ext.height > max_y():
             new_page()
@@ -498,7 +598,10 @@ def render_book(
                     continue
                 # Get position of first char and end of last char
                 rect_start = layout.index_to_pos(pos_in_bytes)
-                end_byte = pos_in_bytes + len(word_bytes) - 1
+                # Pango uses UTF-8 byte offsets, but each index must still be
+                # a code-point boundary; subtracting one byte lands inside the
+                # final Arabic character and can corrupt cached layout state.
+                end_byte = pos_in_bytes + len(word[:-1].encode("utf-8"))
                 rect_end = layout.index_to_pos(end_byte)
                 # Pango returns values in Pango units (1/1024 pixel)
                 py = rect_start.y / Pango.SCALE
@@ -521,7 +624,7 @@ def render_book(
                     "height": ph,
                     "page": page_num,
                     "block_index": current_block_index,
-                    "word_index": word_index,
+                    "word_index": word_index + _word_index_offset,
                 })
                 byte_offset = pos_in_bytes + len(word_bytes)
 
@@ -583,6 +686,7 @@ def render_book(
         y += row_h + 4
 
     page_num = 0
+    has_front_matter = bool((cover_metadata and cover_renderer is not None) or doc.title)
     if cover_metadata and cover_renderer is not None:
         cover_renderer(cr, W, H, cover_metadata, cover_style)
     elif doc.title:
@@ -607,7 +711,10 @@ def render_book(
             )
         y += 5
         draw_line(0.4, 0.8)
-    new_page()
+    if has_front_matter:
+        new_page()
+    else:
+        page_num = 1
 
     prev = None
     i = 0
@@ -617,7 +724,7 @@ def render_book(
         if block.type == BlockType.PAGE_REF:
             if theme.marginal_page_refs:
                 page_ref = block.meta.get("page", 0)
-                ref = f"[{str(page_ref).translate(W2E)}]"
+                ref = f"[ص {str(page_ref).translate(W2E)}]"
                 cr.set_source_rgb(*theme.color_page_ref)
                 ref_layout = make_layout(font_size=theme.size_page_ref, width=50)
                 ref_layout.set_alignment(Pango.Alignment.CENTER)
@@ -717,11 +824,12 @@ def render_book(
         elif block.type in ENTRY_MARKERS:
             if prev:
                 y += theme.size_body * 0.5
-            check_space(40)
+            check_space(theme.size_body * 7)
             marker = ENTRY_MARKERS[block.type]
             color_key = ENTRY_COLORS.get(block.type, "color_body")
             color = getattr(theme, color_key, theme.color_body)
-            draw_text(f"{marker}  {block.text}", font_size=theme.size_body, color=color, bold=True, spacing_after=4)
+            heading = _format_entry_heading(block.text)
+            draw_text(f"{marker}  {heading}", font_size=theme.size_body, color=color, bold=True, spacing_after=6)
 
         elif block.type == BlockType.BASMALA:
             y += 8
@@ -868,7 +976,13 @@ def render_book(
             )
 
         elif block.type == BlockType.PARAGRAPH:
-            draw_text(block.text, font_size=theme.size_body, color=theme.color_body, use_kashida=True)
+            draw_text(
+                block.text,
+                font_size=theme.size_body,
+                color=theme.color_body,
+                use_kashida=True,
+                spacing_after=theme.size_body * 0.6,
+            )
 
         prev = block.type
         i += 1
