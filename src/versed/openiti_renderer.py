@@ -30,6 +30,60 @@ _LTR_RUN = re.compile(r"[(\[]?[A-Za-z0-9][A-Za-z0-9\-\._/:()\[\]]*")
 _ENTRY_NUMBER = re.compile(r"^(\d+)(\s*-\s*)")
 
 
+def _balanced_page_line_counts(
+    line_count: int,
+    first_capacity: int,
+    full_capacity: int,
+    *,
+    min_before_break: int = 3,
+    min_after_break: int = 2,
+) -> list[int]:
+    """Distribute paragraph lines without widows or orphaned fragments.
+
+    A leading zero means the paragraph should start on the next page. Keeping
+    this decision independent of Pango makes the editorial rule testable on
+    systems that do not have the GTK stack installed.
+    """
+    if line_count <= 0:
+        return []
+    if full_capacity <= 0:
+        return [line_count]
+
+    counts: list[int] = []
+    remaining = line_count
+    capacity = max(0, first_capacity)
+    first_page = True
+
+    while remaining > capacity:
+        if capacity < min_before_break:
+            if first_page:
+                counts.append(0)
+                capacity = full_capacity
+                first_page = False
+                continue
+            return [*counts, remaining]
+
+        take = capacity
+        remainder = remaining - take
+        if remainder < min_after_break:
+            take -= min_after_break - remainder
+            if take < min_before_break:
+                if first_page:
+                    counts.append(0)
+                    capacity = full_capacity
+                    first_page = False
+                    continue
+                return [*counts, remaining]
+
+        counts.append(take)
+        remaining -= take
+        capacity = full_capacity
+        first_page = False
+
+    counts.append(remaining)
+    return counts
+
+
 def protect_ltr_runs(text: str) -> str:
     """Wrap Latin/digit runs in BiDi isolates so they don't disturb RTL flow.
 
@@ -346,6 +400,7 @@ def render_book(
     all_word_coords: list[dict] = []
     current_block_index = 0
     pending_apparatus_notes: list[str] = []
+    active_apparatus_notes: list[str] = []
 
     def ml() -> float:
         return theme.margin_inner if page_num % 2 == 0 else theme.margin_outer
@@ -373,6 +428,24 @@ def render_book(
         _, ext = layout.get_pixel_extents()
         return ext.width
 
+    def apparatus_reserve_height(notes: list[str]) -> float:
+        clean_notes = [note.strip() for note in notes if note.strip()]
+        if not clean_notes:
+            return 0.0
+        combined = " \u2022 ".join(clean_notes)
+        if len(combined) > theme.footnote_max_chars:
+            combined = combined[: theme.footnote_max_chars].rstrip() + "..."
+        layout = make_layout(font_size=max(7, theme.size_body - 3), width=tw())
+        layout.set_alignment(Pango.Alignment.LEFT)
+        layout.set_justify(False)
+        layout.set_line_spacing(1.15)
+        layout.set_text(protect_ltr_runs(combined), -1)
+        _, ext = layout.get_pixel_extents()
+        # The rule and breathing room belong to pages that actually carry a
+        # note; reserving the theme maximum on every page leaves six blank
+        # body lines in texts whose references have no apparatus stream.
+        return min(theme.footnote_area_height, max(24.0, ext.height + 16.0))
+
     def render_pending_apparatus_notes() -> None:
         if page_num <= 0 or not pending_apparatus_notes:
             return
@@ -382,7 +455,8 @@ def render_book(
             return
 
         font_size = max(7, theme.size_body - 3)
-        rule_y = H - theme.margin_bottom - theme.footnote_area_height + 8
+        reserve = apparatus_reserve_height(notes)
+        rule_y = H - theme.margin_bottom - reserve + 6
         text_y = rule_y + 8
         max_note_h = max(18, (H - theme.margin_bottom / 2 - 8) - text_y)
 
@@ -397,7 +471,7 @@ def render_book(
             candidate_notes = selected + [remaining[0]]
             combined = " \u2022 ".join(candidate_notes)
             if len(combined) > theme.footnote_max_chars:
-                combined = combined[:theme.footnote_max_chars].rstrip() + "..."
+                combined = combined[: theme.footnote_max_chars].rstrip() + "..."
             layout.set_text(protect_ltr_runs(combined), -1)
             _, ext = layout.get_pixel_extents()
             if ext.height <= max_note_h:
@@ -471,7 +545,10 @@ def render_book(
         y = theme.margin_top
 
     def max_y() -> float:
-        return H - theme.margin_bottom - theme.footnote_area_height
+        reserve = apparatus_reserve_height(
+            [*pending_apparatus_notes, *active_apparatus_notes]
+        )
+        return H - theme.margin_bottom - reserve
 
     def check_space(needed: float) -> None:
         if y + needed > max_y():
@@ -489,6 +566,7 @@ def render_book(
         track_words: bool = True,
         _allow_split: bool = True,
         _word_index_offset: int = 0,
+        _min_after_break: int = 2,
     ) -> None:
         nonlocal y, current_block_index
         if not centered:
@@ -515,18 +593,6 @@ def render_book(
         spacing = spacing_after if spacing_after is not None else theme.size_body * 0.35
 
         overflows_page = y + ext.height + spacing > max_y()
-        full_page_height = max_y() - theme.margin_top
-        if (
-            _allow_split
-            and overflows_page
-            and ext.height + spacing <= full_page_height
-            and y > theme.margin_top
-        ):
-            # A block that fits on a fresh page should stay intact. Using the
-            # final line or two of the current page creates widows that are
-            # especially conspicuous in short Arabic biographical entries.
-            new_page()
-            overflows_page = False
 
         if _allow_split and overflows_page:
             encoded = text.encode("utf-8")
@@ -535,32 +601,52 @@ def render_book(
                 for line in layout.get_lines_readonly()
             ]
             if len(lines) > 1:
-                chunks: list[str] = []
-                pending: list[str] = []
-                available = max_y() - y
 
-                for line_text in lines:
-                    candidate = "\n".join([*pending, line_text])
-                    candidate_layout = make_layout(font_size=font_size, bold=bold)
-                    candidate_layout.set_alignment(
-                        Pango.Alignment.CENTER if centered else Pango.Alignment.LEFT
-                    )
-                    candidate_layout.set_justify(False)
-                    candidate_layout.set_line_spacing(theme.line_height)
-                    candidate_layout.set_text(candidate, -1)
-                    _, candidate_ext = candidate_layout.get_pixel_extents()
-                    if pending and candidate_ext.height > available:
-                        chunks.append("\n".join(pending))
-                        pending = [line_text]
-                        available = max_y() - theme.margin_top
-                    else:
+                def capacity(line_texts: list[str], available: float) -> int:
+                    fitting = 0
+                    pending: list[str] = []
+                    for line_text in line_texts:
+                        candidate = "\n".join([*pending, line_text])
+                        candidate_layout = make_layout(font_size=font_size, bold=bold)
+                        candidate_layout.set_alignment(
+                            Pango.Alignment.CENTER if centered else Pango.Alignment.LEFT
+                        )
+                        candidate_layout.set_justify(False)
+                        candidate_layout.set_line_spacing(theme.line_height)
+                        candidate_layout.set_text(candidate, -1)
+                        _, candidate_ext = candidate_layout.get_pixel_extents()
+                        if pending and candidate_ext.height + spacing > available:
+                            break
+                        if not pending and candidate_ext.height + spacing > available:
+                            return 0
                         pending.append(line_text)
-                if pending:
-                    chunks.append("\n".join(pending))
+                        fitting += 1
+                    return fitting
+
+                first_capacity = capacity(lines, max_y() - y)
+                full_capacity = capacity(lines, max_y() - theme.margin_top)
+                line_counts = _balanced_page_line_counts(
+                    len(lines),
+                    first_capacity,
+                    full_capacity,
+                    min_after_break=_min_after_break,
+                )
+                chunks: list[str] = []
+                cursor = 0
+                for count in line_counts:
+                    if count == 0:
+                        chunks.append("")
+                        continue
+                    chunks.append("\n".join(lines[cursor : cursor + count]))
+                    cursor += count
 
                 word_offset = _word_index_offset
+                rendered_chunk = False
                 for chunk_index, chunk in enumerate(chunks):
-                    if chunk_index > 0:
+                    if not chunk:
+                        new_page()
+                        continue
+                    if rendered_chunk:
                         new_page()
                     is_last = chunk_index == len(chunks) - 1
                     draw_text(
@@ -575,8 +661,10 @@ def render_book(
                         track_words=track_words,
                         _allow_split=False,
                         _word_index_offset=word_offset,
+                        _min_after_break=_min_after_break,
                     )
                     word_offset += len(chunk.split())
+                    rendered_chunk = True
                 return
 
         check_space(ext.height + spacing)
@@ -718,6 +806,19 @@ def render_book(
 
     prev = None
     i = 0
+    non_flowing_types = {
+        BlockType.PAGE_REF,
+        BlockType.MILESTONE,
+        BlockType.APPARATUS_NOTE,
+    }
+    last_flowing_index = next(
+        (
+            index
+            for index in range(len(doc.blocks) - 1, -1, -1)
+            if doc.blocks[index].type not in non_flowing_types
+        ),
+        -1,
+    )
     while i < len(doc.blocks):
         block = doc.blocks[i]
 
@@ -738,6 +839,16 @@ def render_book(
         if block.type == BlockType.MILESTONE:
             i += 1
             continue
+
+        attached_apparatus: list[str] = []
+        next_i = i + 1
+        while (
+            next_i < len(doc.blocks)
+            and doc.blocks[next_i].type == BlockType.APPARATUS_NOTE
+        ):
+            attached_apparatus.append(doc.blocks[next_i].text)
+            next_i += 1
+        active_apparatus_notes[:] = attached_apparatus
 
         if block.type == BlockType.TITLE:
             if prev and prev != BlockType.PAGE_REF:
@@ -824,7 +935,10 @@ def render_book(
         elif block.type in ENTRY_MARKERS:
             if prev:
                 y += theme.size_body * 0.5
-            check_space(theme.size_body * 7)
+            # An entry label is useful only with enough of its biography to
+            # establish the subject. Four composed lines cover the label plus
+            # three prose lines across the bundled Arabic themes.
+            check_space(theme.size_body * 10)
             marker = ENTRY_MARKERS[block.type]
             color_key = ENTRY_COLORS.get(block.type, "color_body")
             color = getattr(theme, color_key, theme.color_body)
@@ -932,6 +1046,8 @@ def render_book(
             )
 
         elif block.type == BlockType.APPARATUS_NOTE:
+            if y > H - theme.margin_bottom - apparatus_reserve_height([block.text]):
+                new_page()
             pending_apparatus_notes.append(block.text)
 
         elif block.type == BlockType.MORPHO_TAG:
@@ -982,10 +1098,14 @@ def render_book(
                 color=theme.color_body,
                 use_kashida=True,
                 spacing_after=theme.size_body * 0.6,
+                _min_after_break=6 if i == last_flowing_index else 2,
             )
 
         prev = block.type
-        i += 1
+        if attached_apparatus:
+            pending_apparatus_notes.extend(attached_apparatus)
+        active_apparatus_notes.clear()
+        i = next_i
         if block.type not in (BlockType.PAGE_REF, BlockType.MILESTONE):
             current_block_index += 1
 
