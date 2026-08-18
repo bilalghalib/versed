@@ -16,6 +16,14 @@ def test_ltr_reference_keeps_its_opening_parenthesis_in_the_isolate():
     assert text == f"ربيعة {LRI}(2){PDI} بن حارثة"
 
 
+def test_pdfkit_proxy_reverses_rtl_by_grapheme_without_gtk():
+    from versed.openiti_renderer import _pdfkit_proxy_text
+
+    assert _pdfkit_proxy_text("ربيعة \u2066(2)\u2069 بن حارثة\u0640") == "ةثراح نب )2( ةعيبر"
+    assert _pdfkit_proxy_text("عَلِيّ") == "يّلِعَ"
+    assert _pdfkit_proxy_text("Ibn Khallikan") == "Ibn Khallikan"
+
+
 def test_macos_renderer_selects_searchable_fontconfig_backend():
     from versed.openiti_renderer import _configure_pango_backend
 

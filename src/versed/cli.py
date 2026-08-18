@@ -235,6 +235,96 @@ def cmd_extract(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_align(args: argparse.Namespace) -> int:
+    """Align OpenITI mARkdown with an English TXT or PDF translation."""
+    from versed.alignment import align_translation
+
+    try:
+        result = align_translation(
+            args.openiti,
+            args.translation,
+            output=args.output,
+            work_id=args.work_id,
+            allow_ocr=args.allow_ocr,
+            allow_partial_pdf=args.allow_partial_pdf,
+            max_cells=args.max_cells,
+            sentence_detail_threshold=args.sentence_threshold,
+            paragraph_detail_threshold=args.paragraph_threshold,
+            gold=args.gold,
+            force=args.force,
+            semantic_model=args.semantic_model,
+            semantic_local_only=args.semantic_local_only,
+            semantic_batch_size=args.semantic_batch_size,
+            semantic_sentences=args.semantic_sentences,
+            ollama_model=args.ollama_judge,
+            ollama_url=args.ollama_url,
+            ollama_max_reviews=args.ollama_max_reviews,
+            corrections=args.corrections,
+        )
+    except (FileNotFoundError, LookupError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    summary = {
+        "output": str(Path(args.output).expanduser().resolve()),
+        "work_id": result.arabic.work_id,
+        "arabic_source": result.arabic.source_name,
+        "english_source": result.english.source_name,
+        "diagnostics": result.diagnostics,
+        "accuracy": result.metrics,
+    }
+    if args.format == "json":
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    else:
+        resolution = result.diagnostics.get("recommended_resolution", {})
+        print(f"Wrote alignment bundle: {summary['output']}")
+        print(
+            "Recommended resolution: "
+            + ", ".join(f"{key}={value}" for key, value in resolution.items())
+        )
+        print(f"Accuracy: {result.metrics.get('status', 'unscored')}")
+    return 0
+
+
+def cmd_verify_alignment(args: argparse.Namespace) -> int:
+    """Verify a portable alignment bundle without extracting it."""
+    from versed.alignment import verify_bundle
+
+    try:
+        manifest = verify_bundle(args.bundle)
+    except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_alignment_doctor(args: argparse.Namespace) -> int:
+    """Report local alignment capabilities without installing or starting models."""
+    from versed.alignment.profiles import (
+        detect_alignment_capabilities,
+        recommend_alignment_profile,
+    )
+
+    capabilities = detect_alignment_capabilities()
+    recommendation = recommend_alignment_profile(capabilities)
+    payload = {
+        "capabilities": capabilities.to_dict(),
+        "recommendation": recommendation.to_dict(),
+    }
+    if args.format == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        memory = capabilities.memory_gib
+        print(f"Computer: {capabilities.system} {capabilities.machine}, memory={memory or 'unknown'} GiB")
+        print(f"Recommended profile: {recommendation.profile}")
+        print(f"Semantic scope: {recommendation.semantic_scope}")
+        print(f"Ollama judge: {recommendation.ollama_judge or 'none'}")
+        for note in recommendation.notes:
+            print(f"- {note}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
@@ -278,6 +368,80 @@ def build_parser() -> argparse.ArgumentParser:
         help="Return a non-zero exit code when pages need OCR but OCR is unavailable",
     )
     extract_parser.set_defaults(func=cmd_extract)
+
+    align_parser = subparsers.add_parser(
+        "align",
+        help="align an OpenITI mARkdown source with an English TXT or PDF translation",
+    )
+    align_parser.add_argument(
+        "openiti",
+        help="local mARkdown file, OpenITI book/version ID, or OpenITI GitHub URL",
+    )
+    align_parser.add_argument("translation", help="local English PDF, TXT, or Markdown file")
+    align_parser.add_argument("-o", "--output", required=True, help="output alignment ZIP")
+    align_parser.add_argument("--work-id", help="override the shared stable work identifier")
+    align_parser.add_argument("--allow-ocr", action="store_true", help="OCR scanned English PDF pages")
+    align_parser.add_argument(
+        "--allow-partial-pdf",
+        action="store_true",
+        help="continue when some PDF pages could not be extracted",
+    )
+    align_parser.add_argument("--gold", help="optional stable-ID sentence gold JSONL")
+    align_parser.add_argument(
+        "--corrections",
+        help="optional review-id keyed human corrections JSONL from a prior run",
+    )
+    align_parser.add_argument(
+        "--semantic-model",
+        nargs="?",
+        const="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        help="use multilingual semantic scoring; optionally name a model or local directory",
+    )
+    align_parser.add_argument(
+        "--semantic-local-only",
+        action="store_true",
+        help="do not download missing semantic model files",
+    )
+    align_parser.add_argument("--semantic-batch-size", type=int, default=32)
+    align_parser.add_argument(
+        "--semantic-sentences",
+        action="store_true",
+        help="also use the semantic model for sentence refinement (slower, more memory)",
+    )
+    align_parser.add_argument(
+        "--ollama-judge",
+        metavar="MODEL",
+        help="ask an already-installed local Ollama model to review doubtful links",
+    )
+    align_parser.add_argument(
+        "--ollama-url",
+        default="http://127.0.0.1:11434",
+        help="local Ollama HTTP endpoint (loopback only)",
+    )
+    align_parser.add_argument(
+        "--ollama-max-reviews",
+        type=int,
+        help="review at most this many doubtful links (default: all)",
+    )
+    align_parser.add_argument("--max-cells", type=int, default=2_000_000)
+    align_parser.add_argument("--sentence-threshold", type=float, default=0.60)
+    align_parser.add_argument("--paragraph-threshold", type=float, default=0.45)
+    align_parser.add_argument("--force", action="store_true", help="replace an existing output ZIP")
+    align_parser.add_argument("--format", choices=["text", "json"], default="text")
+    align_parser.set_defaults(func=cmd_align)
+
+    verify_alignment_parser = subparsers.add_parser(
+        "verify-alignment", help="verify an alignment ZIP's members and checksums"
+    )
+    verify_alignment_parser.add_argument("bundle")
+    verify_alignment_parser.set_defaults(func=cmd_verify_alignment)
+
+    doctor_parser = subparsers.add_parser(
+        "alignment-doctor",
+        help="recommend an alignment profile from local memory and installed runtimes",
+    )
+    doctor_parser.add_argument("--format", choices=["text", "json"], default="text")
+    doctor_parser.set_defaults(func=cmd_alignment_doctor)
 
     return parser
 

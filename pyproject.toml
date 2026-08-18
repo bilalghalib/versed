@@ -24,8 +24,9 @@ keywords = ["arabic", "pdf", "markdown", "text-extraction", "quran", "ocr", "nlp
 dependencies = []  # Zero required deps! Pure Python for string repair.
 
 [project.optional-dependencies]
-pdf = ["pymupdf>=1.24.0"]
+pdf = ["pymupdf>=1.24.0", "Pillow>=10.0.0", "fonttools>=4.0.0"]
 ocr = ["pytesseract>=0.3.10", "Pillow>=10.0.0"]
+semantic = ["torch>=2.0.0", "transformers>=4.40.0,<6"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

@@ -11,6 +11,9 @@ import math
 import os
 import re
 import sys
+import tempfile
+import unicodedata
+from io import BytesIO
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -93,6 +96,159 @@ def protect_ltr_runs(text: str) -> str:
     if not text or LRI in text:
         return text
     return _LTR_RUN.sub(lambda m: f"{LRI}{m.group(0)}{PDI}", text)
+
+
+def _semantic_pdf_text(text: str) -> str:
+    """Return source text suitable for the PDF reading layer.
+
+    The isolates make mixed Arabic and Latin runs shape correctly, while
+    kashida inserts tatweel only to fill a rendered line. Neither belongs in
+    copied text, where they otherwise change cursor order and word search.
+    """
+    return text.replace(LRI, "").replace(PDI, "").replace(TATWEEL, "")
+
+
+def _pdfkit_proxy_text(text: str) -> str:
+    """Encode an RTL line so PDFKit copies it back in logical order.
+
+    PDFKit returns unshaped RTL text in reverse visual order. Reversing by
+    grapheme cluster before writing the invisible layer makes its clipboard
+    output match the source without detaching Arabic combining marks.
+    """
+    logical_text = _semantic_pdf_text(text)
+    if not ARABIC_CHAR.search(logical_text):
+        return logical_text
+
+    clusters: list[str] = []
+    for char in logical_text:
+        if clusters and (unicodedata.combining(char) or char in "\u200c\u200d"):
+            clusters[-1] += char
+        else:
+            clusters.append(char)
+    return "".join(reversed(clusters))
+
+
+def _semantic_font_path() -> str:
+    """Locate a Unicode font that preserves base Arabic code points."""
+    candidates = (
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/usr/share/fonts/opentype/fonts-hosny-amiri/Amiri-Regular.ttf",
+        "/usr/share/fonts/opentype/amiri/Amiri-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    raise RuntimeError(
+        "OpenITI selectable PDFs need Arial Unicode, Amiri, or Noto Naskh Arabic."
+    )
+
+
+def _subset_semantic_font(source_path: str, text: str, output_path: str) -> None:
+    """Subset the hidden text font so accessibility does not inflate the PDF."""
+    try:
+        from fontTools import subset
+        from fontTools.ttLib import TTFont
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise RuntimeError(
+            "OpenITI selectable PDFs need fonttools; install versed-pdf[pdf]."
+        ) from exc
+
+    font = TTFont(source_path)
+    subsetter = subset.Subsetter(options=subset.Options())
+    subsetter.populate(unicodes={ord(char) for char in text})
+    subsetter.subset(font)
+    font.save(output_path)
+
+
+def _attach_semantic_text_layer(
+    out_path: str,
+    page_text: dict[int, list[tuple[str, float, float, float, float]]],
+) -> None:
+    """Replace outlined body pages with compact images and searchable text."""
+    try:
+        import fitz
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - depends on optional extra
+        raise RuntimeError(
+            "OpenITI PDF rendering needs PyMuPDF and Pillow for a correct Arabic text layer. "
+            "Install versed-pdf[pdf]."
+        ) from exc
+
+    output_dir = os.path.dirname(os.path.abspath(out_path))
+    with tempfile.TemporaryDirectory(prefix=".versed-pdf-", dir=output_dir) as temp_dir:
+        subset_font_path = os.path.join(temp_dir, "semantic.ttf")
+        semantic_path = os.path.join(temp_dir, "semantic.pdf")
+        all_text = "".join(
+            _semantic_pdf_text(line[0])
+            for lines in page_text.values()
+            for line in lines
+        )
+        _subset_semantic_font(_semantic_font_path(), all_text, subset_font_path)
+        semantic_font = fitz.Font(fontfile=subset_font_path)
+
+        with fitz.open(out_path) as source_pdf, fitz.open() as output_pdf:
+            for page_index, source_page in enumerate(source_pdf):
+                if page_index not in page_text:
+                    output_pdf.insert_pdf(
+                        source_pdf, from_page=page_index, to_page=page_index
+                    )
+                    continue
+
+                page = output_pdf.new_page(
+                    width=source_page.rect.width,
+                    height=source_page.rect.height,
+                )
+                pixmap = source_page.get_pixmap(dpi=200, alpha=False)
+                image = Image.frombytes(
+                    "RGB", (pixmap.width, pixmap.height), pixmap.samples
+                )
+                image = image.quantize(
+                    colors=16,
+                    method=Image.Quantize.FASTOCTREE,
+                    dither=Image.Dither.NONE,
+                )
+                image_bytes = BytesIO()
+                image.save(image_bytes, format="PNG", optimize=True)
+                page.insert_image(page.rect, stream=image_bytes.getvalue())
+
+                lines = sorted(
+                    page_text[page_index], key=lambda line: line[2]
+                )
+                text_writer = fitz.TextWriter(page.rect)
+                for text, x, y, width, height in lines:
+                    proxy_text = _pdfkit_proxy_text(text)
+                    if not proxy_text:
+                        continue
+                    font_size = max(4.0, height * 0.75)
+                    text_width = semantic_font.text_length(
+                        proxy_text, fontsize=font_size
+                    )
+                    max_width = page.rect.width - 72.0
+                    if text_width > max_width:
+                        font_size *= max_width / text_width
+                        text_width = max_width
+                    column_x = max(36.0, page.rect.width - 36.0 - text_width)
+                    baseline = y + height * 0.8
+                    text_writer.append(
+                        fitz.Point(column_x, baseline),
+                        proxy_text,
+                        font=semantic_font,
+                        fontsize=font_size,
+                    )
+                text_writer.write_text(page, render_mode=3, overlay=True)
+
+            output_pdf.save(
+                semantic_path,
+                garbage=4,
+                deflate=True,
+                deflate_images=True,
+                deflate_fonts=True,
+                use_objstms=1,
+                compression_effort=100,
+            )
+
+        os.replace(semantic_path, out_path)
 
 
 def _configure_pango_backend(
@@ -398,6 +554,7 @@ def render_book(
     current_chapter = doc.title or ""
     current_section = ""
     all_word_coords: list[dict] = []
+    semantic_page_text: dict[int, list[tuple[str, float, float, float, float]]] = {}
     current_block_index = 0
     pending_apparatus_notes: list[str] = []
     active_apparatus_notes: list[str] = []
@@ -427,6 +584,30 @@ def render_book(
         layout.set_text(text, -1)
         _, ext = layout.get_pixel_extents()
         return ext.width
+
+    def paint_layout(layout: Any) -> None:
+        """Paint shaped text without preserving Cairo's visual-order text map."""
+        x, y = cr.get_current_point()
+        rendered_bytes = layout.get_text().encode("utf-8")
+        physical_page = page_num if has_front_matter else page_num - 1
+        page_lines = semantic_page_text.setdefault(physical_page, [])
+        for line in layout.get_lines_readonly():
+            line_text = rendered_bytes[
+                line.start_index : line.start_index + line.length
+            ].decode("utf-8")
+            _, logical = line.get_pixel_extents()
+            line_position = layout.index_to_pos(line.start_index)
+            page_lines.append(
+                (
+                    line_text,
+                    x + logical.x,
+                    y + line_position.y / Pango.SCALE,
+                    logical.width,
+                    line_position.height / Pango.SCALE,
+                )
+            )
+        PangoCairo.layout_path(cr, layout)
+        cr.fill()
 
     def apparatus_reserve_height(notes: list[str]) -> float:
         clean_notes = [note.strip() for note in notes if note.strip()]
@@ -507,7 +688,7 @@ def render_book(
         protected_combined = protect_ltr_runs(combined)
         layout.set_text(protected_combined, -1)
         cr.move_to(ml(), text_y)
-        PangoCairo.show_layout(cr, layout)
+        paint_layout(layout)
         pending_apparatus_notes[:] = remaining
 
     def decorate_current_page() -> None:
@@ -520,7 +701,7 @@ def render_book(
         num_layout.set_alignment(Pango.Alignment.CENTER)
         num_layout.set_text(num_str, -1)
         cr.move_to(0, H - theme.margin_bottom / 2)
-        PangoCairo.show_layout(cr, num_layout)
+        paint_layout(num_layout)
         if theme.running_headers and current_chapter:
             cr.set_source_rgb(*theme.color_running_header)
             header_layout = make_layout(font_size=theme.size_running_header, width=tw())
@@ -530,7 +711,7 @@ def render_book(
             header_layout.set_alignment(Pango.Alignment.CENTER)
             header_layout.set_text(header_text, -1)
             cr.move_to(ml(), theme.margin_top - 30)
-            PangoCairo.show_layout(cr, header_layout)
+            paint_layout(header_layout)
             cr.set_line_width(0.3)
             cr.move_to(ml(), theme.margin_top - 8)
             cr.line_to(ml() + tw(), theme.margin_top - 8)
@@ -718,7 +899,7 @@ def render_book(
 
         cr.set_source_rgb(*(color or theme.color_body))
         cr.move_to(ml(), y)
-        PangoCairo.show_layout(cr, layout)
+        paint_layout(layout)
         y += ext.height + spacing
 
     def draw_line(width_frac: float = 0.5, thickness: float = 0.5) -> None:
@@ -761,16 +942,16 @@ def render_book(
         check_space(row_h + 10)
         cr.set_source_rgb(*theme.color_verse)
         cr.move_to(ml() + col_w + 40, y)
-        PangoCairo.show_layout(cr, left_layout)
+        paint_layout(left_layout)
         cr.set_source_rgb(*theme.color_ornament)
         ornament_layout = make_layout(font_size=theme.size_verse, width=40)
         ornament_layout.set_alignment(Pango.Alignment.CENTER)
         ornament_layout.set_text(theme.verse_ornament, -1)
         cr.move_to(ml() + col_w, y)
-        PangoCairo.show_layout(cr, ornament_layout)
+        paint_layout(ornament_layout)
         cr.set_source_rgb(*theme.color_verse)
         cr.move_to(ml(), y)
-        PangoCairo.show_layout(cr, right_layout)
+        paint_layout(right_layout)
         y += row_h + 4
 
     page_num = 0
@@ -832,7 +1013,7 @@ def render_book(
                 ref_layout.set_text(ref, -1)
                 x = W - mr() + 8 if page_num % 2 == 0 else ml() - 50
                 cr.move_to(x, y - 5)
-                PangoCairo.show_layout(cr, ref_layout)
+                paint_layout(ref_layout)
             i += 1
             continue
 
@@ -1112,6 +1293,7 @@ def render_book(
     decorate_current_page()
 
     surface.finish()
+    _attach_semantic_text_layer(out_path, semantic_page_text)
 
     type_counts: Dict[str, int] = {}
     for block in doc.blocks:

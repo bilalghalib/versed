@@ -12,6 +12,7 @@ and markdown/plain-text outputs.
 pip install versed-pdf
 pip install versed-pdf[pdf]
 pip install versed-pdf[pdf,ocr]
+pip install versed-pdf[semantic]  # optional multilingual alignment evidence
 ```
 
 ## Quick start
@@ -48,6 +49,9 @@ versed repair-text "tafß¬l"
 versed detect book.pdf
 versed classify book.pdf
 versed extract book.pdf -o book.md
+versed alignment-doctor
+versed align arabic.mARkdown english.pdf -o aligned.zip
+versed verify-alignment aligned.zip
 ```
 
 ## Public modules
@@ -60,6 +64,12 @@ versed extract book.pdf -o book.md
 - `versed.markdown`: semantic blocks to Markdown/plain text
 - `versed.openiti`: parsed OpenITI block JSON to `Document` and markdown
 - `versed.extract`: end-to-end local extraction
+- `versed.alignment`: OpenITI mARkdown to English PDF/TXT hierarchical alignment
+
+The aligner keeps structural, paragraph, and sentence links together, zooms out
+to a bounded region when exact boundaries are weak, and writes reviewable,
+checksummed ZIP bundles. Models are optional and replaceable; no model is
+downloaded by the deterministic core. See [the alignment guide](docs/ALIGNMENT.md).
 
 ## License
 
