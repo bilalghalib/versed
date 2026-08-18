@@ -1,0 +1,4 @@
+{
+  "name": "versed-pdf",
+  "install": "bash .cursor/install.sh"
+}
