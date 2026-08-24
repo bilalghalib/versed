@@ -393,11 +393,22 @@ def _plain_text_document(text: str, *, source_name: str, work_id: str) -> Alignm
     in_back_matter = False
     previous_was_note = False
 
-    family_counts = Counter(
-        signature[0]
-        for kind, _value, signature in tokens
-        if kind == "heading" and signature is not None
-    )
+    # Gutenberg's license footer has its own recurring "Section 1...5"
+    # spine. It must not make the actual book body look like front matter.
+    # Heading positions are measured against the preceding paragraph because
+    # headings themselves do not consume a paragraph index.
+    family_counts: Counter[str] = Counter()
+    family_paragraph_index = -1
+    for kind, _value, signature in tokens:
+        if kind == "paragraph":
+            family_paragraph_index += 1
+            continue
+        inside_gutenberg_body = (
+            (gutenberg_start is None or family_paragraph_index >= gutenberg_start)
+            and (gutenberg_end is None or family_paragraph_index < gutenberg_end)
+        )
+        if signature is not None and inside_gutenberg_body:
+            family_counts[signature[0]] += 1
     dominant_family = ""
     if family_counts:
         candidate, count = family_counts.most_common(1)[0]

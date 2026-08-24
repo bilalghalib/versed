@@ -110,6 +110,41 @@ The next narrative remains alignable.
     assert note.flags == ("exclude_from_alignment", "possible_footnote")
 
 
+def test_gutenberg_license_sections_do_not_quarantine_book_body():
+    text = """The Project Gutenberg eBook of A Book
+
+*** START OF THE PROJECT GUTENBERG EBOOK A BOOK ***
+
+The translated narrative begins here.
+
+The translated narrative continues here.
+
+*** END OF THE PROJECT GUTENBERG EBOOK A BOOK ***
+
+Section 1. General Terms of Use
+
+License language.
+
+Section 2. Information about the Project Gutenberg Mission
+
+More license language.
+"""
+
+    document = _plain_text_document(text, source_name="translation.txt", work_id="demo")
+    alignable = [
+        paragraph.text
+        for unit in document.structures
+        for paragraph in unit.paragraphs
+        if "exclude_from_alignment" not in paragraph.flags
+    ]
+
+    assert document.metadata["dominant_heading_family"] == ""
+    assert alignable == [
+        "The translated narrative begins here.",
+        "The translated narrative continues here.",
+    ]
+
+
 def test_plain_english_file_loads_without_pdf_dependencies(tmp_path: Path):
     translation = tmp_path / "translation.txt"
     translation.write_text("A complete English paragraph.", encoding="utf-8")
