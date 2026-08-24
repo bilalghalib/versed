@@ -1,6 +1,7 @@
 """Portable Arabic-English document alignment."""
 
 from .api import align_translation
+from .batch import align_manifest
 from .bundle import verify_bundle, write_bundle
 from .corrections import apply_review_corrections
 from .engine import align_documents
@@ -43,6 +44,7 @@ __all__ = [
     "SentenceLink",
     "StructuralLink",
     "align_documents",
+    "align_manifest",
     "align_translation",
     "apply_review_corrections",
     "detect_alignment_capabilities",

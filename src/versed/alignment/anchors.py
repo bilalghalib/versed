@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass
 
@@ -11,6 +12,8 @@ from .scoring import (
     landmark_evidence,
     normalized_numbers,
 )
+
+_MAX_NAME_ANCHOR_PAIRS = 250_000
 
 
 @dataclass(frozen=True)
@@ -26,13 +29,31 @@ def discover_structural_links(
     english: AlignmentDocument,
 ) -> tuple[StructuralLink, ...]:
     """Use a bilateral ordered spine only when headings confirm it."""
-    ar_units = arabic.structures
-    en_units = english.structures
-    if len(ar_units) == len(en_units) and len(ar_units) >= 2:
+    ar_units = tuple(
+        unit
+        for unit in arabic.structures
+        if any("exclude_from_alignment" not in paragraph.flags for paragraph in unit.paragraphs)
+    )
+    en_units = tuple(
+        unit
+        for unit in english.structures
+        if any("exclude_from_alignment" not in paragraph.flags for paragraph in unit.paragraphs)
+    )
+    ar_families = {unit.metadata.get("heading_family") for unit in ar_units} - {None, ""}
+    en_families = {unit.metadata.get("heading_family") for unit in en_units} - {None, ""}
+    compatible_family = not ar_families or not en_families or bool(ar_families & en_families)
+    if compatible_family and len(ar_units) == len(en_units) and len(ar_units) >= 2:
         confirmations: list[tuple[str, ...]] = []
         for ar_unit, en_unit in zip(ar_units, en_units):
             evidence = landmark_evidence(ar_unit.heading, en_unit.heading)
+            shared_family = (
+                ar_unit.metadata.get("heading_family")
+                if ar_unit.metadata.get("heading_family")
+                == en_unit.metadata.get("heading_family")
+                else ""
+            )
             markers = (
+                *((f"family:{shared_family}",) if shared_family else ()),
                 *(f"name:{value}" for value in evidence.name_skeletons),
                 *(f"number:{value}" for value in evidence.numbers),
             )
@@ -69,17 +90,48 @@ def _weighted_monotone(candidates: list[ParagraphAnchor]) -> list[ParagraphAncho
     if not candidates:
         return []
     ordered = sorted(candidates, key=lambda item: (item.arabic_index, item.english_index, -item.score))
-    best = [float(item.score) for item in ordered]
+    english_positions = sorted({item.english_index for item in ordered})
+    best = [float("-inf")] * len(ordered)
     previous: list[int | None] = [None] * len(ordered)
-    for index, item in enumerate(ordered):
-        for earlier in range(index):
-            candidate = ordered[earlier]
-            if candidate.arabic_index >= item.arabic_index or candidate.english_index >= item.english_index:
-                continue
-            score = best[earlier] + item.score
-            if score > best[index]:
-                best[index] = score
-                previous[index] = earlier
+    tree_scores = [float("-inf")] * (len(english_positions) + 1)
+    tree_indices: list[int | None] = [None] * (len(english_positions) + 1)
+
+    def query(position: int) -> tuple[float, int | None]:
+        score = float("-inf")
+        index: int | None = None
+        while position > 0:
+            if tree_scores[position] > score:
+                score = tree_scores[position]
+                index = tree_indices[position]
+            position -= position & -position
+        return score, index
+
+    def update(position: int, score: float, index: int) -> None:
+        while position < len(tree_scores):
+            if score > tree_scores[position]:
+                tree_scores[position] = score
+                tree_indices[position] = index
+            position += position & -position
+
+    group_start = 0
+    while group_start < len(ordered):
+        group_end = group_start + 1
+        while (
+            group_end < len(ordered)
+            and ordered[group_end].arabic_index == ordered[group_start].arabic_index
+        ):
+            group_end += 1
+        pending_updates: list[tuple[int, float, int]] = []
+        for index in range(group_start, group_end):
+            item = ordered[index]
+            position = bisect_left(english_positions, item.english_index) + 1
+            prior_score, prior_index = query(position - 1)
+            best[index] = float(item.score) + max(0.0, prior_score)
+            previous[index] = prior_index if prior_score > 0 else None
+            pending_updates.append((position, best[index], index))
+        for position, score, index in pending_updates:
+            update(position, score, index)
+        group_start = group_end
     cursor = max(range(len(ordered)), key=best.__getitem__)
     path: list[ParagraphAnchor] = []
     while cursor is not None:
@@ -105,6 +157,42 @@ def discover_paragraph_anchors(
         for paragraph in english
         for skeleton in set(english_anchor_skeletons(paragraph.text))
     )
+    candidates_by_pair: dict[tuple[int, int], ParagraphAnchor] = {}
+    ar_unique_numbers = {
+        number: index
+        for index, paragraph in enumerate(arabic)
+        for number in set(normalized_numbers(paragraph.text))
+        if ar_number_counts[number] == 1
+    }
+    en_unique_numbers = {
+        number: index
+        for index, paragraph in enumerate(english)
+        for number in set(normalized_numbers(paragraph.text))
+        if en_number_counts[number] == 1
+    }
+    for number in sorted(ar_unique_numbers.keys() & en_unique_numbers.keys()):
+        ar_index = ar_unique_numbers[number]
+        en_index = en_unique_numbers[number]
+        key = (ar_index, en_index)
+        current = candidates_by_pair.get(key)
+        marker = f"number:{number}"
+        if current is None:
+            candidates_by_pair[key] = ParagraphAnchor(ar_index, en_index, 26, (marker,))
+        else:
+            candidates_by_pair[key] = ParagraphAnchor(
+                ar_index,
+                en_index,
+                current.score + 6,
+                (*current.evidence, marker),
+            )
+
+    # Name comparison is useful inside ordinary chapters but quadratic over a
+    # whole large book. Unique numbers above remain available as cheap hard
+    # landmarks; semantic scoring or an explicit structural spine handles the
+    # interiors. This is a quality fallback, never a hidden guessed zip.
+    if len(arabic) * len(english) > _MAX_NAME_ANCHOR_PAIRS:
+        return _weighted_monotone(list(candidates_by_pair.values()))
+
     candidates: list[ParagraphAnchor] = []
     for en_index, en_paragraph in enumerate(english):
         scored: list[tuple[int, int, tuple[str, ...]]] = []
@@ -144,9 +232,15 @@ def discover_paragraph_anchors(
             continue
         candidates.append(ParagraphAnchor(best_ar, en_index, best_score, markers))
 
+    for candidate in candidates:
+        key = (candidate.arabic_index, candidate.english_index)
+        current = candidates_by_pair.get(key)
+        if current is None or candidate.score > current.score:
+            candidates_by_pair[key] = candidate
+
     # One Arabic paragraph cannot hard-anchor two English paragraphs.
     by_ar: dict[int, ParagraphAnchor] = {}
-    for candidate in candidates:
+    for candidate in candidates_by_pair.values():
         current = by_ar.get(candidate.arabic_index)
         if current is None or candidate.score > current.score:
             by_ar[candidate.arabic_index] = candidate

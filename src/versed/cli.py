@@ -299,6 +299,31 @@ def cmd_verify_alignment(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_align_batch(args: argparse.Namespace) -> int:
+    """Build multiple portable bundles from a JSON or JSONL manifest."""
+    from versed.alignment.batch import align_manifest
+
+    try:
+        report = align_manifest(
+            args.manifest,
+            args.output_dir,
+            semantic_model=args.semantic_model,
+            semantic_local_only=args.semantic_local_only,
+            semantic_batch_size=args.semantic_batch_size,
+            semantic_sentences=args.semantic_sentences,
+            max_cells=args.max_cells,
+            sentence_detail_threshold=args.sentence_threshold,
+            paragraph_detail_threshold=args.paragraph_threshold,
+            force=args.force,
+            resume=args.resume,
+        )
+    except (FileNotFoundError, LookupError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
+    return 1 if report["summary"]["errors"] else 0
+
+
 def cmd_alignment_doctor(args: argparse.Namespace) -> int:
     """Report local alignment capabilities without installing or starting models."""
     from versed.alignment.profiles import (
@@ -429,6 +454,33 @@ def build_parser() -> argparse.ArgumentParser:
     align_parser.add_argument("--force", action="store_true", help="replace an existing output ZIP")
     align_parser.add_argument("--format", choices=["text", "json"], default="text")
     align_parser.set_defaults(func=cmd_align)
+
+    batch_parser = subparsers.add_parser(
+        "align-batch",
+        help="align every OpenITI/English edition in a JSON or JSONL manifest",
+    )
+    batch_parser.add_argument("manifest", help="batch manifest JSON or JSONL")
+    batch_parser.add_argument("--output-dir", required=True, help="directory for bundles and report")
+    batch_parser.add_argument(
+        "--semantic-model",
+        nargs="?",
+        const="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        help="use multilingual semantic scoring; optionally name a model or local directory",
+    )
+    batch_parser.add_argument("--semantic-local-only", action="store_true")
+    batch_parser.add_argument("--semantic-batch-size", type=int, default=32)
+    batch_parser.add_argument("--semantic-sentences", action="store_true")
+    batch_parser.add_argument("--max-cells", type=int, default=2_000_000)
+    batch_parser.add_argument("--sentence-threshold", type=float, default=0.60)
+    batch_parser.add_argument("--paragraph-threshold", type=float, default=0.45)
+    batch_parser.add_argument("--force", action="store_true")
+    batch_parser.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="skip existing bundles only after checksum verification",
+    )
+    batch_parser.set_defaults(func=cmd_align_batch)
 
     verify_alignment_parser = subparsers.add_parser(
         "verify-alignment", help="verify an alignment ZIP's members and checksums"

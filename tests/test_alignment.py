@@ -67,6 +67,24 @@ def test_oversized_unanchored_interval_zooms_out_to_local_region():
     assert "dp_window_too_large" in result.recommended_links[0].flags
 
 
+def test_oversized_interval_does_not_allocate_semantic_score_matrix():
+    class FailIfCalled:
+        model_name = "test"
+
+        def encode(self, _texts):
+            return []
+
+        def scorer(self, _arabic, _english):
+            raise AssertionError("semantic scorer must not be built for an oversized interval")
+
+    arabic = _document("ar", [("", ["نص أول.", "نص ثان."])])
+    english = _document("en", [("", ["First text.", "Second text."])])
+
+    result = align_documents(arabic, english, paragraph_embedder=FailIfCalled(), max_cells=1)
+
+    assert result.diagnostics["coarse_intervals"] == 1
+
+
 def test_bilateral_numbered_headings_confirm_structural_sequence():
     arabic = _document("ar", [("الباب ١", ["ألف"]), ("الباب ٢", ["باء"])])
     english = _document("en", [("Chapter 1", ["A"]), ("Chapter 2", ["B"])])
@@ -75,6 +93,56 @@ def test_bilateral_numbered_headings_confirm_structural_sequence():
 
     assert len(links) == 2
     assert all(link.method == "bilateral_structure_sequence" for link in links)
+
+
+def test_bilateral_spine_ignores_quarantined_front_matter():
+    arabic = _document(
+        "ar",
+        [
+            ("المقامة البلخية", ["ألف"]),
+            ("المقامة البغدادية", ["باء"]),
+        ],
+    )
+    arabic = replace(
+        arabic,
+        structures=tuple(
+            replace(unit, metadata={"heading_family": "maqama"})
+            for unit in arabic.structures
+        ),
+    )
+    english = _document(
+        "en",
+        [
+            ("", ["Translator's preface"]),
+            ("I. THE MAQAMA OF BALKH", ["A"]),
+            ("II. THE MAQAMA OF BAGHDAD", ["B"]),
+        ],
+    )
+    front = english.structures[0]
+    english = replace(
+        english,
+        structures=(
+            replace(
+                front,
+                paragraphs=tuple(
+                    replace(
+                        paragraph,
+                        flags=("exclude_from_alignment", "front_matter"),
+                    )
+                    for paragraph in front.paragraphs
+                ),
+            ),
+            *(
+                replace(unit, metadata={"heading_family": "maqama"})
+                for unit in english.structures[1:]
+            ),
+        ),
+    )
+
+    links = discover_structural_links(arabic, english)
+
+    assert len(links) == 2
+    assert all("en:u0000" not in link.english_structure_ids for link in links)
 
 
 def test_one_weak_capitalized_word_does_not_become_a_landmark():
@@ -87,6 +155,25 @@ def test_one_weak_capitalized_word_does_not_become_a_landmark():
     )
 
     assert anchors == []
+
+
+def test_large_landmark_search_keeps_unique_numbers_without_name_cross_product(
+    monkeypatch,
+):
+    arabic = _document("ar", [("", [f"فقرة {index}" for index in range(501)])])
+    english = _document("en", [("", [f"Paragraph {index}" for index in range(501)])])
+
+    def fail_name_comparison(*_args, **_kwargs):
+        raise AssertionError("large intervals must not enter pairwise name comparison")
+
+    monkeypatch.setattr("versed.alignment.anchors.landmark_evidence", fail_name_comparison)
+    anchors = discover_paragraph_anchors(
+        list(arabic.structures[0].paragraphs),
+        list(english.structures[0].paragraphs),
+    )
+
+    assert len(anchors) == 501
+    assert anchors[250].evidence == ("number:250",)
 
 
 def test_doubt_is_emitted_as_a_stable_review_item():

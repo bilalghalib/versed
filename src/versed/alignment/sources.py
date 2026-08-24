@@ -7,6 +7,7 @@ import hashlib
 import io
 import re
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,11 +32,41 @@ OPENITI_METADATA_URL = (
 )
 _ALLOWED_HOSTS = frozenset({"raw.githubusercontent.com", "github.com"})
 _OPENITI_ID = re.compile(r"^\d{4}[A-Za-z][A-Za-z0-9]+\.[A-Za-z0-9]+(?:\.[A-Za-z0-9_-]+)?$")
-_HEADING = re.compile(
-    r"^(?:(?:chapter|book|part|section|volume|maqama|ode)\b|"
-    r"(?:[IVXLCDM]+|\d+)\s*[.):-])",
+_UNIT_FAMILY = r"chapter|book|part|section|volume|maqama|maqaria|ode"
+_PREFIXED_UNIT_HEADING = re.compile(
+    rf"^\s*[•·\-*]?\s*(?P<label>[IVXLCDMHU]+|\d+)\s*[.)-]?\s*"
+    rf"(?:the\s+)?(?P<family>{_UNIT_FAMILY})\b",
     re.IGNORECASE,
 )
+_SUFFIXED_UNIT_HEADING = re.compile(
+    rf"^\s*(?:the\s+)?(?P<family>{_UNIT_FAMILY})\s+"
+    rf"(?P<label>[IVXLCDMHU]+|\d+)\b",
+    re.IGNORECASE,
+)
+_MARKDOWN_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(?P<title>\S.*)$")
+_PAGE_NUMBER = re.compile(r"^\s*[ivxlcdm]*\s*\d+\s*$", re.IGNORECASE)
+_BACK_MATTER = re.compile(
+    r"^\s*(?:index|glossary|bibliography|works\s+cited)\s*$",
+    re.IGNORECASE,
+)
+_RUNNING_HEADER = re.compile(r"^[A-Z0-9'’*?.\- ]{4,70}\s+\d{1,4}$")
+_SCHOLARLY_NOTE = re.compile(
+    r"\b(?:ibid|freytag|arab\s+proverbs|literally|proper\s+name|"
+    r"reference\s+to|for\s+a\s+list|the\s+metr(?:e|er)|qur.?an|"
+    r"a\.h\.|a\.d\.|ob\.|vol\.|p\.\s*\d|pp\.\s*\d|see\s+[A-Z]|"
+    r"another\s+reading|arabici[sz]ed|sanskrit|dictionary|lexicon|"
+    r"manuscript|commentator|a\s+figure\s+for|"
+    r"there\s+is\s+a\s+tradition|was\s+founded|died\s+(?:about|in)|"
+    r"the\s+name\s+(?:of|applied)|the\s+person\s+referred|"
+    r"the\s+(?:thief|swindler|sharper|robber)\b|"
+    r"this\s+is\s+a\s+species|the\s+plan\s+is|the\s+practice\s+of|"
+    r"would\s+make\s+better\s+sense|him\s+who.{0,80}[:;]|"
+    r"allusion\s+to|means\s+the|signifies\s+the)\b",
+    re.IGNORECASE,
+)
+_NUMBERED_NOTE = re.compile(r"^\s*\d{1,3}\s+\S.{0,100}?\s[:;]", re.DOTALL)
+_FOOTNOTE_PREFIX = re.compile(r"^\s*\([a-z0-9]{1,3}\)\s+", re.IGNORECASE)
+_OCR_JUNK = re.compile(r"^[\W_]*[A-Za-z]?[\W_]*$")
 _TEXT_SUFFIXES = frozenset({".txt", ".text", ".md", ".markdown"})
 _GUTENBERG_START = re.compile(r"^\*{3}\s*START OF (?:THE )?PROJECT GUTENBERG", re.IGNORECASE)
 _GUTENBERG_END = re.compile(r"^\*{3}\s*END OF (?:THE )?PROJECT GUTENBERG", re.IGNORECASE)
@@ -172,6 +203,20 @@ def _block_text(block: Any) -> str:
     return str(block.text or "").strip()
 
 
+def _arabic_heading_family(heading: str) -> str:
+    normalized = " ".join(heading.split())
+    families = (
+        ("maqama", "المقامة"),
+        ("chapter", "الباب"),
+        ("book", "الكتاب"),
+        ("section", "الفصل"),
+        ("part", "القسم"),
+        ("volume", "الجزء"),
+        ("ode", "القصيدة"),
+    )
+    return next((family for family, marker in families if marker in normalized), "")
+
+
 def openiti_alignment_document(source: LoadedText) -> AlignmentDocument:
     parsed = parse_openiti(source.text)
     structures: list[AlignmentStructure] = []
@@ -200,6 +245,7 @@ def openiti_alignment_document(source: LoadedText) -> AlignmentDocument:
                 heading=heading,
                 anchor_key=heading,
                 paragraphs=paragraphs,
+                metadata={"heading_family": _arabic_heading_family(heading)},
             )
         )
         pending = []
@@ -241,27 +287,122 @@ def openiti_alignment_document(source: LoadedText) -> AlignmentDocument:
     return document
 
 
-def _looks_like_heading(text: str) -> bool:
-    words = text.split()
-    if not words or len(words) > 16 or len(text) > 140:
-        return False
-    letters = [character for character in text if character.isalpha()]
-    uppercase = sum(character.isupper() for character in letters)
-    return bool(_HEADING.search(text)) or (bool(letters) and uppercase / len(letters) >= 0.78)
+def _heading_signature(text: str) -> tuple[str, str] | None:
+    """Return an explicit structural family and printed label.
+
+    Capitalization is intentionally not evidence. OCR running heads are often
+    uppercase and vastly outnumber real chapters. A plain-text structural unit
+    must instead expose a unit word plus an ordinal, in either common order.
+    Markdown headings are explicit by syntax and use their normalized title as
+    the family-local label.
+    """
+    markdown = _MARKDOWN_HEADING.match(text)
+    if markdown:
+        return "markdown", " ".join(markdown.group("title").split())
+    if len(text) > 180:
+        return None
+    match = _PREFIXED_UNIT_HEADING.match(text) or _SUFFIXED_UNIT_HEADING.match(text)
+    if not match:
+        return None
+    family = match.group("family").casefold()
+    if family == "maqaria":
+        family = "maqama"
+    return family, match.group("label").upper()
+
+
+def _dehyphenate(lines: list[str]) -> str:
+    output: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if output and output[-1].endswith("-") and line[:1].islower():
+            output[-1] = output[-1][:-1] + line
+        else:
+            output.append(line)
+    return " ".join(output)
+
+
+def _repeated_running_headers(lines: list[str]) -> set[str]:
+    candidates = [
+        " ".join(line.split()).casefold()
+        for line in lines
+        if 8 <= len(line.strip()) <= 80
+        and 2 <= len(line.split()) <= 8
+        and any(character.isalpha() for character in line)
+        and line.upper() == line
+        and _heading_signature(line) is None
+    ]
+    return {value for value, count in Counter(candidates).items() if count >= 3}
+
+
+def _plain_tokens(text: str) -> list[tuple[str, str, tuple[str, str] | None]]:
+    """Split text into paragraphs and explicit heading lines without loss."""
+    lines = text.lstrip("\ufeff").splitlines()
+    repeated_headers = _repeated_running_headers(lines)
+    tokens: list[tuple[str, str, tuple[str, str] | None]] = []
+    paragraph_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_lines
+        value = _dehyphenate(paragraph_lines)
+        if value:
+            tokens.append(("paragraph", value, None))
+        paragraph_lines = []
+
+    for raw in lines:
+        normalized = " ".join(raw.split())
+        if not normalized:
+            flush_paragraph()
+            continue
+        signature = _heading_signature(normalized)
+        if signature is not None:
+            flush_paragraph()
+            heading = _MARKDOWN_HEADING.sub(lambda match: match.group("title"), normalized)
+            tokens.append(("heading", heading, signature))
+            continue
+        if (
+            normalized.casefold() in repeated_headers
+            or _PAGE_NUMBER.fullmatch(normalized)
+            or _RUNNING_HEADER.fullmatch(normalized)
+        ):
+            flush_paragraph()
+            continue
+        paragraph_lines.append(raw)
+    flush_paragraph()
+    return tokens
 
 
 def _plain_text_document(text: str, *, source_name: str, work_id: str) -> AlignmentDocument:
-    raw_blocks = [" ".join(block.split()) for block in re.split(r"\n\s*\n", text) if block.strip()]
-    if not raw_blocks:
+    tokens = _plain_tokens(text)
+    if not tokens:
         raise ValueError("English source contains no text")
     structures: list[AlignmentStructure] = []
     heading = ""
+    heading_family = ""
+    heading_label = ""
     pending: list[tuple[str, tuple[str, ...], dict[str, Any]]] = []
-    start_markers = [index for index, value in enumerate(raw_blocks) if _GUTENBERG_START.search(value)]
-    end_markers = [index for index, value in enumerate(raw_blocks) if _GUTENBERG_END.search(value)]
+    paragraph_values = [value for kind, value, _signature in tokens if kind == "paragraph"]
+    start_markers = [index for index, value in enumerate(paragraph_values) if _GUTENBERG_START.search(value)]
+    end_markers = [index for index, value in enumerate(paragraph_values) if _GUTENBERG_END.search(value)]
     gutenberg_start = start_markers[0] if start_markers else None
     gutenberg_end = end_markers[-1] if end_markers else None
     excluded_count = 0
+    paragraph_index = -1
+    seen_body_heading = False
+    in_back_matter = False
+    previous_was_note = False
+
+    family_counts = Counter(
+        signature[0]
+        for kind, _value, signature in tokens
+        if kind == "heading" and signature is not None
+    )
+    dominant_family = ""
+    if family_counts:
+        candidate, count = family_counts.most_common(1)[0]
+        if count >= 2:
+            dominant_family = candidate
 
     def flush() -> None:
         nonlocal pending
@@ -278,49 +419,89 @@ def _plain_text_document(text: str, *, source_name: str, work_id: str) -> Alignm
             )
             for index, (value, flags, metadata) in enumerate(pending)
         )
-        structures.append(AlignmentStructure(structure_id, len(structures), heading, paragraphs, heading))
+        structures.append(
+            AlignmentStructure(
+                structure_id,
+                len(structures),
+                heading,
+                paragraphs,
+                heading,
+                {
+                    "heading_family": heading_family,
+                    "heading_label": heading_label,
+                    "paratext": not bool(heading_family),
+                },
+            )
+        )
         pending = []
 
-    for block_index, block in enumerate(raw_blocks):
-        flags: tuple[str, ...] = ()
-        metadata: dict[str, Any] = {}
+    for kind, block, signature in tokens:
+        if kind == "heading":
+            family, label = signature or ("", "")
+            if dominant_family and family != dominant_family:
+                flags: tuple[str, ...] = ()
+                metadata: dict[str, Any] = {
+                    "inline_heading": True,
+                    "heading_family": family,
+                }
+                if not seen_body_heading:
+                    flags = ("exclude_from_alignment", "front_matter")
+                    metadata["paratext"] = "front_matter"
+                    excluded_count += 1
+                pending.append((block, flags, metadata))
+                continue
+            flush()
+            heading = block
+            heading_family = family
+            heading_label = label
+            seen_body_heading = True
+            previous_was_note = False
+            continue
+
+        paragraph_index += 1
+        flags = ()
+        metadata = {}
         outside_gutenberg_body = (
-            (gutenberg_start is not None and block_index <= gutenberg_start)
-            or (gutenberg_end is not None and block_index >= gutenberg_end)
+            (gutenberg_start is not None and paragraph_index <= gutenberg_start)
+            or (gutenberg_end is not None and paragraph_index >= gutenberg_end)
         )
+        if _BACK_MATTER.fullmatch(block):
+            in_back_matter = True
         if outside_gutenberg_body:
             flags = ("exclude_from_alignment", "gutenberg_boilerplate")
             metadata = {"paratext": "gutenberg_boilerplate"}
         elif _FOOTNOTE_BLOCK.match(block):
             flags = ("exclude_from_alignment", "footnote")
             metadata = {"paratext": "footnote"}
+        elif dominant_family and not seen_body_heading:
+            flags = ("exclude_from_alignment", "front_matter")
+            metadata = {"paratext": "front_matter"}
+        elif in_back_matter:
+            flags = ("exclude_from_alignment", "back_matter")
+            metadata = {"paratext": "back_matter"}
+        else:
+            word_count = len(block.split())
+            looks_like_note = (
+                bool(_NUMBERED_NOTE.match(block))
+                or bool(_FOOTNOTE_PREFIX.match(block))
+                or (bool(_SCHOLARLY_NOTE.search(block)) and word_count <= 180)
+                or (previous_was_note and word_count <= 12)
+            )
+            looks_like_junk = word_count <= 4 and (
+                bool(_OCR_JUNK.fullmatch(block))
+                or sum(character.isalnum() for character in block) <= 3
+            )
+            if looks_like_note or looks_like_junk:
+                paratext = "possible_footnote" if looks_like_note else "ocr_junk"
+                flags = ("exclude_from_alignment", paratext)
+                metadata = {"paratext": paratext}
+            previous_was_note = looks_like_note
         if flags:
             excluded_count += 1
-
-        if _looks_like_heading(block) and not flags:
-            flush()
-            heading = block
-        else:
-            pending.append((block, flags, metadata))
+        pending.append((block, flags, metadata))
     flush()
     if not structures:
-        # Heading detection is evidence, not permission to discard a source.
-        structure_id = "en:u0000"
-        structures.append(
-            AlignmentStructure(
-                structure_id,
-                0,
-                "",
-                tuple(
-                    AlignmentParagraph.create(
-                        paragraph_id=f"{structure_id}:p{index:04d}",
-                        sequence=index,
-                        text=value,
-                    )
-                    for index, value in enumerate(raw_blocks)
-                ),
-            )
-        )
+        raise ValueError("English source contains no alignable text")
     document = AlignmentDocument(
         work_id=work_id,
         language="en",
@@ -331,6 +512,7 @@ def _plain_text_document(text: str, *, source_name: str, work_id: str) -> Alignm
             "adapter": "plain_text",
             "excluded_paragraphs": excluded_count,
             "gutenberg_markers_detected": bool(start_markers or end_markers),
+            "dominant_heading_family": dominant_family,
         },
     )
     document.validate()
@@ -433,4 +615,57 @@ def load_english_translation(
             "extraction_stats": extraction.stats,
             "partial": bool(unsupported),
         },
+    )
+
+
+def load_english_translations(
+    paths: list[str | Path] | tuple[str | Path, ...],
+    *,
+    work_id: str,
+    allow_ocr: bool = False,
+    allow_partial_pdf: bool = False,
+) -> AlignmentDocument:
+    """Load one translation edition split across one or more source files.
+
+    Multi-file editions are currently limited to text/Markdown witnesses. PDF
+    volumes retain page-level extraction provenance and should first be
+    normalized individually rather than silently flattened together.
+    """
+    if not paths:
+        raise ValueError("translation edition must contain at least one source file")
+    if len(paths) == 1:
+        return load_english_translation(
+            paths[0],
+            work_id=work_id,
+            allow_ocr=allow_ocr,
+            allow_partial_pdf=allow_partial_pdf,
+        )
+
+    resolved = [Path(path).expanduser().resolve() for path in paths]
+    if any(path.suffix.lower() not in _TEXT_SUFFIXES for path in resolved):
+        raise ValueError("multi-file translation editions currently require text or Markdown")
+    total_bytes = sum(path.stat().st_size for path in resolved if path.is_file())
+    if total_bytes > _MAX_TEXT_BYTES:
+        raise ValueError(f"combined translation exceeds {_MAX_TEXT_BYTES} bytes")
+    texts = [_read_limited_file(path) for path in resolved]
+    result = _plain_text_document(
+        "\n\n".join(texts),
+        source_name=" + ".join(path.name for path in resolved),
+        work_id=work_id,
+    )
+    metadata = {
+        **result.metadata,
+        "adapter": "plain_text_multi_file",
+        "source_files": [
+            {"name": path.name, "sha256": _sha256_file(path)}
+            for path in resolved
+        ],
+    }
+    return AlignmentDocument(
+        work_id=result.work_id,
+        language=result.language,
+        source_name=result.source_name,
+        source_hash=result.source_hash,
+        structures=result.structures,
+        metadata=metadata,
     )

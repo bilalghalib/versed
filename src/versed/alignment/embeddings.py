@@ -70,6 +70,11 @@ class TransformerEmbedder:
         self.waypoint_count = 0
         self._cache: dict[str, tuple[float, ...]] = {}
 
+    def clear_cache(self) -> None:
+        """Release per-document vectors while retaining loaded model weights."""
+        self._cache.clear()
+        self.waypoint_count = 0
+
     def encode(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
         missing = [text for text in dict.fromkeys(texts) if text not in self._cache]
         torch = self._torch

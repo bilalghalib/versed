@@ -153,6 +153,39 @@ versed align arabic.mARkdown english.txt \
 Add `--semantic-sentences` for the thorough profile. Add
 `--semantic-local-only` when a run must refuse uncached model downloads.
 
+Run a resumable corpus campaign from a JSON or JSONL manifest:
+
+```json
+{
+  "items": [
+    {
+      "id": "hamadhani-prendergast-1915",
+      "openiti": "0398BadicZamanHamadhani.Maqamat",
+      "translation": "prendergast_hamadhani_1915_djvu.txt"
+    },
+    {
+      "id": "multi-volume-example",
+      "openiti": "arabic.mARkdown",
+      "translations": ["volume-1.txt", "volume-2.txt"]
+    }
+  ]
+}
+```
+
+```bash
+versed align-batch manifest.json \
+  --output-dir alignment-bundles \
+  --semantic-model sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 \
+  --semantic-local-only --semantic-sentences
+```
+
+The batch runner processes one edition at a time, reuses model weights without
+retaining earlier books' vectors, and rewrites `batch-report.json` after every
+item. Its default resume mode skips a bundle only after its checksums verify.
+Each manifest item is rights-neutral: publication policy remains the caller's
+responsibility. Multiple translation files are concatenated in listed order;
+multi-file PDF editions are rejected because page identity would be ambiguous.
+
 Experimentally audit doubts with an already-installed local model:
 
 ```bash
@@ -235,6 +268,46 @@ Three examples were selected with seed `20260818`:
 
 The third example is why both recall and matched-span precision are reported.
 A broad span can contain the answer while still being a poor exact boundary.
+
+## Hamadhani structural-spine regression
+
+Inputs:
+
+- OpenITI `0398BadicZamanHamadhani.Maqamat`;
+- W. J. Prendergast's 1915 English text;
+- an earlier book-specific alignment retained only as an unscored control.
+
+This is the complementary test to Hayy: both sides expose a recurring maqāma
+spine, so the generic parser should discover it without a book-name rule. OCR
+front matter, running headers, page numbers, scholarly notes, and ordinary
+capitalized lines are retained in the document but excluded from alignment.
+
+| Run | Structural links | Paragraph links | Sentence links | Accuracy |
+| --- | ---: | ---: | ---: | --- |
+| Generic basic | 51 | 547 | 609 | unscored |
+| Generic balanced | 51 | 492 | 289 | unscored |
+| Generic thorough | 51 | 492 | 291 | unscored |
+| Earlier book-specific control | 51 | 483 | 1,500 | unscored |
+
+The generic run found all 51 recurring units and independently confirmed 24
+heading pairs; its previous false-heading failure produced only one structural
+link and 335 bogus English structures. Link totals are not an accuracy metric:
+the specialized control's larger sentence count does not make it more correct.
+
+Three thorough-profile links were selected with seed `20260825`:
+
+| Section | Arabic | English | Result |
+| --- | --- | --- | --- |
+| Kufa | `أنا في ثروة تشق لها بردة الطرب` | “I am in a state of affluence so great that the pocket of joy would tear” | `1:1`, confidence .848, radius 1 |
+| Qazwin | `رب كما أنك أنقذتني` | “Lord, as Thou hast saved me” | `1:1`, confidence .970, radius 0 |
+| Advice | final Arabic salutation | an English scholarly-note fragment | `1:2`, confidence .252, radius 2; demoted and queued for review |
+
+The third sample is intentionally reported rather than hidden. It remains
+inside the correct structural unit, but the local paragraph link is wrong. This
+demonstrates the boundary of the current claim: the clamp prevents book-level
+drift, while low-signal links still require coarser display or correction.
+Independent Hamadhani gold is still needed before reporting exact, ±1, ±2, or
+catastrophic-miss rates.
 
 ## Review and limitations
 

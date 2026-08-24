@@ -43,6 +43,73 @@ def test_plain_english_adapter_detects_numbered_sections_without_losing_text():
     ]
 
 
+def test_plain_english_adapter_does_not_treat_uppercase_ocr_as_structure():
+    text = """THE TRANSLATOR
+
+An introductory paragraph.
+
+I. THE MAQAMA OF BALKH
+The first body.
+
+THE MAQAMAT OF BADI 12
+
+II. THE MAQAMA OF BASRA
+The second body.
+"""
+
+    document = _plain_text_document(text, source_name="translation.txt", work_id="demo")
+    alignable = [
+        unit
+        for unit in document.structures
+        if any("exclude_from_alignment" not in paragraph.flags for paragraph in unit.paragraphs)
+    ]
+
+    assert [unit.heading for unit in alignable] == [
+        "I. THE MAQAMA OF BALKH",
+        "II. THE MAQAMA OF BASRA",
+    ]
+    assert document.metadata["dominant_heading_family"] == "maqama"
+    assert all(
+        "exclude_from_alignment" in paragraph.flags
+        for paragraph in document.structures[0].paragraphs
+    )
+
+
+def test_explicit_heading_line_does_not_consume_following_body_without_blank_line():
+    text = """CHAPTER 1
+The opening body continues on the next line.
+
+CHAPTER 2
+The closing body.
+"""
+
+    document = _plain_text_document(text, source_name="translation.txt", work_id="demo")
+
+    assert document.structures[0].heading == "CHAPTER 1"
+    assert document.structures[0].paragraphs[0].text == (
+        "The opening body continues on the next line."
+    )
+
+
+def test_plain_text_quarantines_probable_scholarly_notes_but_retains_them():
+    text = """CHAPTER 1
+
+The translated narrative remains alignable.
+
+1 Literally: the proper name refers to an older manuscript.
+
+CHAPTER 2
+
+The next narrative remains alignable.
+"""
+
+    document = _plain_text_document(text, source_name="translation.txt", work_id="demo")
+    note = document.structures[0].paragraphs[1]
+
+    assert note.text.startswith("1 Literally")
+    assert note.flags == ("exclude_from_alignment", "possible_footnote")
+
+
 def test_plain_english_file_loads_without_pdf_dependencies(tmp_path: Path):
     translation = tmp_path / "translation.txt"
     translation.write_text("A complete English paragraph.", encoding="utf-8")

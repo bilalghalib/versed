@@ -105,6 +105,27 @@ def _align_with_landmarks(
         nonlocal ar_cursor, en_cursor, coarse
         ar_values = [value.text for value in arabic[ar_cursor:ar_end]]
         en_values = [value.text for value in english[en_cursor:en_end]]
+        cells = (len(ar_values) + 1) * (len(en_values) + 1)
+        if ar_values and en_values and cells > max_cells:
+            coarse = True
+            output.append(
+                _offset_link(
+                    DPLink(
+                        0,
+                        len(ar_values),
+                        0,
+                        len(en_values),
+                        f"{len(ar_values)}-{len(en_values)}",
+                        0.0,
+                        0.2,
+                        3,
+                        ("coarse_interval", "dp_window_too_large"),
+                    ),
+                    ar_cursor,
+                    en_cursor,
+                )
+            )
+            return
         try:
             links = align_spans(
                 ar_values,

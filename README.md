@@ -51,6 +51,7 @@ versed classify book.pdf
 versed extract book.pdf -o book.md
 versed alignment-doctor
 versed align arabic.mARkdown english.pdf -o aligned.zip
+versed align-batch manifest.json --output-dir alignment-bundles
 versed verify-alignment aligned.zip
 ```
 
