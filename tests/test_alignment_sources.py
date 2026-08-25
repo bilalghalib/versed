@@ -4,11 +4,13 @@ import pytest
 
 from versed.alignment.sources import (
     LoadedText,
+    _block_text,
     _plain_text_document,
     _validated_openiti_url,
     load_english_translation,
     openiti_alignment_document,
 )
+from versed.openiti_parser import parse_openiti
 
 OPENITI_SAMPLE = """######OpenITI#
 #META# 000.BookURI :: 0581IbnTufayl.HayyIbnYaqzan
@@ -29,6 +31,33 @@ def test_openiti_adapter_keeps_structures_paragraphs_and_stable_ids():
 
     assert [unit.heading for unit in document.structures] == ["المقدمة", "حي بن يقظان"]
     assert document.structures[1].paragraphs[0].id == "ar:u0001:p0000"
+
+
+def test_openiti_paragraphs_carry_their_source_block_index():
+    """Every paragraph records where it sat in ``parse_openiti(...).blocks``.
+
+    Consumers key an OpenITI block by its index into that list, so the index
+    is the join column back to the source block. Assert the round trip rather
+    than literal numbers: the index must select a block whose text is the
+    paragraph's own.
+    """
+    source = LoadedText(OPENITI_SAMPLE, "hayy.txt", "0581IbnTufayl.HayyIbnYaqzan", {})
+    blocks = parse_openiti(OPENITI_SAMPLE).blocks
+
+    document = openiti_alignment_document(source)
+
+    paragraphs = [
+        paragraph for unit in document.structures for paragraph in unit.paragraphs
+    ]
+    assert paragraphs, "sample must produce paragraphs to index"
+    indices = [
+        paragraph.metadata["openiti_source_sequence"] for paragraph in paragraphs
+    ]
+    assert len(set(indices)) == len(indices), "two paragraphs claim one block"
+    assert indices == sorted(indices), "indices must follow reading order"
+    for paragraph, index in zip(paragraphs, indices):
+        # Verse lines collapse runs of whitespace, so compare on words.
+        assert _block_text(blocks[index]).split() == paragraph.text.split()
 
 
 def test_plain_english_adapter_detects_numbered_sections_without_losing_text():

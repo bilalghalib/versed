@@ -258,7 +258,7 @@ def openiti_alignment_document(source: LoadedText) -> AlignmentDocument:
         OpenITIBlockType.HEADING_4,
         OpenITIBlockType.HEADING_5,
     }
-    for block in parsed.blocks:
+    for source_sequence, block in enumerate(parsed.blocks):
         if block.type in heading_types:
             flush()
             heading = _block_text(block)
@@ -271,7 +271,19 @@ def openiti_alignment_document(source: LoadedText) -> AlignmentDocument:
         flags: tuple[str, ...] = ()
         if block.type == OpenITIBlockType.APPARATUS_NOTE:
             flags = ("exclude_from_alignment", "apparatus_note")
-        pending.append((text, flags, {"openiti_block_type": block.type.value, **block.meta}))
+        pending.append(
+            (
+                text,
+                flags,
+                {
+                    "openiti_block_type": block.type.value,
+                    **block.meta,
+                    # Consumers key a block by its index into parse_openiti's
+                    # block list, so this stays authoritative over block.meta.
+                    "openiti_source_sequence": source_sequence,
+                },
+            )
+        )
     flush()
     if not structures:
         raise ValueError("OpenITI source contains no alignable text")
