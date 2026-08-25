@@ -29,7 +29,7 @@ function shell(title: string, body: string, options?: { wide?: boolean }): strin
       background: ${colors.canvas};
       color: ${colors.text};
     }
-    .frame { width: ${max}; margin: 0 auto; min-height: 100vh; background: ${colors.primary}; }
+    .frame { width: min(100%, 390px); margin: 0 auto; min-height: 100vh; background: ${colors.primary}; }
     .card { background: ${colors.elevated}; border: 1px solid ${colors.border}; border-radius: 20px; padding: 20px; }
     .eyebrow { font-size: 11px; letter-spacing: 1.4px; font-weight: 600; color: ${colors.gold}; text-transform: uppercase; }
     h1 { font-size: 26px; font-weight: 500; margin: 8px 0 0; letter-spacing: -0.4px; }
@@ -40,8 +40,8 @@ function shell(title: string, body: string, options?: { wide?: boolean }): strin
     .btn-gold { background: ${colors.gold}; color: #fff; }
     .btn-ghost { background: ${colors.panel}; color: ${colors.text}; }
     input, textarea { width: 100%; border: 1px solid ${colors.border}; border-radius: 14px; padding: 12px 14px; font: inherit; background: ${colors.elevated}; }
-    .tabs { display: flex; gap: 4px; background: ${colors.secondary}; padding: 6px; border-radius: 14px; }
-    .tab { flex: 1; text-align: center; padding: 10px 6px; border-radius: 10px; font-size: 12px; color: ${colors.textSecondary}; }
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: ${colors.secondary}; padding: 6px; border-radius: 14px; }
+    .tab { text-align: center; padding: 10px 6px; border-radius: 10px; font-size: 12px; color: ${colors.textSecondary}; }
     .tab.active { background: ${colors.inverse}; color: #FFF8EE; }
     .week { margin-top: 14px; }
     .week-label { font-weight: 600; margin-bottom: 8px; }
@@ -197,7 +197,7 @@ export function renderCmcTeacherAdmin(input: {
     <h1 style="font-size:22px;margin-bottom:12px">Teacher desk</h1>
     ${tabBar}
     ${body}
-  </div>`, { wide: true });
+  </div>`);
 }
 
 export function renderAdminLogin(surface: AdminSurface, state: ScreenState = "ready"): string {
