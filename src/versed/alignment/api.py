@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .bundle import write_bundle
 from .corrections import apply_review_corrections
-from .embeddings import TransformerEmbedder
+from .embeddings import build_embedder
 from .engine import align_documents
 from .judge import OllamaJudge, review_with_judge
 from .metrics import score_region_gold, score_sentence_gold
@@ -69,7 +69,7 @@ def align_translation(
         allow_partial_pdf=allow_partial_pdf,
     )
     embedder = (
-        TransformerEmbedder(
+        build_embedder(
             semantic_model,
             local_files_only=semantic_local_only,
             batch_size=semantic_batch_size,

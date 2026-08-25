@@ -231,3 +231,52 @@ def test_openiti_url_is_allowlisted_and_converted_to_raw():
 def test_openiti_url_rejects_unsafe_or_unrelated_hosts(url):
     with pytest.raises(ValueError):
         _validated_openiti_url(url)
+
+
+def test_embedder_backend_matches_the_model_family():
+    """Pooling must follow the model, not the loader.
+
+    Mean-pooling LaBSE or Qwen3-Embedding yields degraded vectors silently
+    rather than raising, so routing is asserted rather than left to chance.
+    """
+    from versed.alignment.embeddings import (
+        SentenceTransformerEmbedder,
+        TransformerEmbedder,
+        build_embedder,
+    )
+
+    seen: list[tuple[str, str]] = []
+
+    class FakeTransformer(TransformerEmbedder):
+        def __init__(self, name, **kwargs):
+            seen.append(("transformers", name))
+
+    class FakeSentenceTransformer(SentenceTransformerEmbedder):
+        def __init__(self, name, **kwargs):
+            seen.append(("sentence-transformers", name))
+
+    import versed.alignment.embeddings as module
+
+    original = (module.TransformerEmbedder, module.SentenceTransformerEmbedder)
+    module.TransformerEmbedder, module.SentenceTransformerEmbedder = (
+        FakeTransformer,
+        FakeSentenceTransformer,
+    )
+    try:
+        build_embedder("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        build_embedder("sentence-transformers/LaBSE")
+        build_embedder("Qwen/Qwen3-Embedding-0.6B")
+        # An explicit backend overrides the family heuristic.
+        build_embedder("sentence-transformers/LaBSE", backend="transformers")
+    finally:
+        module.TransformerEmbedder, module.SentenceTransformerEmbedder = original
+
+    assert [backend for backend, _ in seen] == [
+        "transformers",
+        "sentence-transformers",
+        "sentence-transformers",
+        "transformers",
+    ]
+
+    with pytest.raises(ValueError, match="backend must be"):
+        build_embedder("sentence-transformers/LaBSE", backend="nonsense")

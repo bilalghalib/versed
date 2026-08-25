@@ -75,8 +75,7 @@ class TransformerEmbedder:
         self._cache.clear()
         self.waypoint_count = 0
 
-    def encode(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
-        missing = [text for text in dict.fromkeys(texts) if text not in self._cache]
+    def _encode_missing(self, missing: list[str]) -> None:
         torch = self._torch
         for start in range(0, len(missing), self.batch_size):
             batch = missing[start:start + self.batch_size]
@@ -95,6 +94,11 @@ class TransformerEmbedder:
                 pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
             for text, vector in zip(batch, pooled.cpu().tolist()):
                 self._cache[text] = tuple(float(value) for value in vector)
+
+    def encode(self, texts: Sequence[str]) -> list[tuple[float, ...]]:
+        missing = [text for text in dict.fromkeys(texts) if text not in self._cache]
+        if missing:
+            self._encode_missing(missing)
         return [self._cache[text] for text in texts]
 
     def scorer(self, arabic: list[str], english: list[str]) -> SpanScorer:
@@ -161,6 +165,107 @@ class TransformerEmbedder:
             )
 
         return score
+
+
+class SentenceTransformerEmbedder(TransformerEmbedder):
+    """Embedder that applies each model's own published pooling.
+
+    :class:`TransformerEmbedder` mean-pools the last hidden state, which is
+    what MiniLM was trained with but wrong for other families: LaBSE pools the
+    CLS token through a dense layer, and Qwen3-Embedding pools the last token.
+    Mean-pooling them silently produces degraded vectors rather than an error,
+    so models whose pooling differs must load through sentence-transformers,
+    which carries the correct pooling in the model's own config.
+
+    Scoring, caching, and waypoint behaviour are inherited unchanged, so a run
+    differs only by how a text becomes a vector.
+    """
+
+    def __init__(
+        self,
+        model_name_or_path: str = DEFAULT_SEMANTIC_MODEL,
+        *,
+        batch_size: int = 32,
+        max_length: int = 256,
+        local_files_only: bool = False,
+        device: str = "auto",
+        context_threshold: float = 0.62,
+        context_margin: float = 0.025,
+        position_penalty: float = 0.08,
+    ) -> None:
+        if batch_size <= 0 or max_length <= 0:
+            raise ValueError("batch_size and max_length must be positive")
+        if not 0 <= context_threshold <= 1 or context_margin < 0 or position_penalty < 0:
+            raise ValueError("semantic context parameters are out of range")
+        try:
+            import torch
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "the sentence-transformers backend requires: "
+                "pip install sentence-transformers"
+            ) from exc
+        self._torch = torch
+        if device == "auto":
+            if torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+        if device not in {"cpu", "mps", "cuda"}:
+            raise ValueError("semantic device must be auto, cpu, mps, or cuda")
+        self._model = SentenceTransformer(
+            model_name_or_path,
+            device=device,
+            local_files_only=local_files_only,
+        )
+        self._model.max_seq_length = max_length
+        self.device = device
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.model_name = model_name_or_path
+        self.context_threshold = context_threshold
+        self.context_margin = context_margin
+        self.position_penalty = position_penalty
+        self.waypoint_count = 0
+        self._cache: dict[str, tuple[float, ...]] = {}
+
+    def _encode_missing(self, missing: list[str]) -> None:
+        vectors = self._model.encode(
+            missing,
+            batch_size=self.batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        for text, vector in zip(missing, vectors):
+            self._cache[text] = tuple(float(value) for value in vector)
+
+
+def build_embedder(
+    model_name_or_path: str,
+    *,
+    backend: str = "auto",
+    **kwargs,
+) -> TransformerEmbedder:
+    """Construct the embedder whose pooling matches ``model_name_or_path``.
+
+    ``auto`` keeps the transformers path for mean-pooled models and routes
+    every other known family through sentence-transformers.
+    """
+    if backend not in {"auto", "transformers", "sentence-transformers"}:
+        raise ValueError(
+            "backend must be auto, transformers, or sentence-transformers"
+        )
+    if backend == "auto":
+        lowered = model_name_or_path.lower()
+        needs_own_pooling = any(
+            marker in lowered for marker in ("labse", "qwen3-embedding", "bge-m3")
+        )
+        backend = "sentence-transformers" if needs_own_pooling else "transformers"
+    if backend == "sentence-transformers":
+        return SentenceTransformerEmbedder(model_name_or_path, **kwargs)
+    return TransformerEmbedder(model_name_or_path, **kwargs)
 
 
 def _context_waypoints(matrix, *, threshold: float, margin: float) -> tuple[tuple[float, float], ...]:

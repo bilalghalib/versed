@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .bundle import verify_bundle, write_bundle
-from .embeddings import TransformerEmbedder
+from .embeddings import build_embedder
 from .engine import align_documents
 from .sources import (
     load_english_translations,
@@ -90,7 +90,7 @@ def align_manifest(
     destination.mkdir(parents=True, exist_ok=True)
     report_path = destination / "batch-report.json"
     embedder = (
-        TransformerEmbedder(
+        build_embedder(
             semantic_model,
             local_files_only=semantic_local_only,
             batch_size=semantic_batch_size,
