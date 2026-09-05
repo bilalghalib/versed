@@ -132,3 +132,27 @@ def test_parse_openiti_splits_inline_title_markers():
     ]
     assert doc.blocks[0].text == "الباب السابع في العقل"
     assert doc.blocks[1].text == "الباب الأول في فضل العلم"
+
+
+def test_parse_openiti_keeps_guillemet_quotation_as_prose():
+    raw = """######OpenITI#
+#META#Header#End#
+
+# قال الحكيم: «من عرف نفسه فقد عرف ربه» ثم شرح معنى النفس.
+"""
+
+    doc = parse_openiti(raw)
+
+    assert [block.type for block in doc.blocks] == [BlockType.PARAGRAPH]
+
+
+def test_parse_openiti_recognizes_dedicated_quran_ornaments():
+    raw = """######OpenITI#
+#META#Header#End#
+
+# قال تعالى: ﴿اقرأ باسم ربك الذي خلق﴾
+"""
+
+    doc = parse_openiti(raw)
+
+    assert [block.type for block in doc.blocks] == [BlockType.QURAN_CITATION]
