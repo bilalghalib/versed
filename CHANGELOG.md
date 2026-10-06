@@ -1,6 +1,46 @@
 # Changelog
 
-## 1.3.0 (unreleased)
+## 1.3.1 (unreleased)
+
+### OpenITI typesetter
+
+- **Mixed-direction text layer.** Glyphs follow UAX #9 visual order of the
+  isolate-free line text (resolved by Pango/FriBidi) instead of the drawn
+  layout's isolate-level runs. PDFKit now round-trips digits, Arabic-Indic
+  digits, `(2)` footnote numbers and embedded Latin titles exactly (in 1.3.0
+  it mirrored `(2)` and reordered Latin). Poppler is exact for Arabic and
+  `902هـ`; next to a number it puts the separating space on the other side
+  (`681بدمشق`), and brackets or marks beside LTR runs move. MuPDF is exact
+  for Arabic only. A Chrome-printed PDF of the same text extracts the same
+  way in Poppler and MuPDF, so these are reader limits (documented as xfail
+  tests).
+- **Verse numbers sit in the margin opposite the page markers.** They shared
+  the outer margin and overprinted `[ص …]` (0466IbnSinanKhafaji.Diwan).
+- **No silent font substitution.** `render_book` raises when Pango would draw
+  the theme's body or heading face with another font, or fall back per glyph
+  for Arabic. On the build Mac, "Amiri" had been resolving to AlNile and
+  DecoType Naskh (a broken Amiri download was an HTML file).
+
+### OpenITI parser
+
+- Every Arabic source word now reaches the block model, in order, for all
+  740 OpenITI sources on the Archive (the 1.3.0 parser lost words in 3):
+  - text after a line-initial page anchor (`PageV01P023 وتسديدهم…`, 47 words
+    in 0711IbnIbrahimCimadDinWasiti.Tadhkira) and after glued anchors
+    (`PageV01P298PageV01P300…`, 0625AbuMuhammadIbnRushd.HalYattasilBiCaql);
+  - `#NewRec#` and other header lines no longer leak into the body
+    (0720IbnCumarKurdi.Juz);
+  - folio anchors such as `PageV01P003b` are read as page anchors.
+- Canonical `%~%` lines are split locally like the `%` form; a pair with no
+  words on one side (OCR noise such as `قدهة 1 %~% 11` in
+  0671AbuCabdAllahQurtubi.Asna) stays one verse line, not a fake couplet.
+- An inline title (` $ `) inside a `%` verse line is a title, not a verse
+  line (0833IbnJazari.DurraMudiyya printed "$ & باب البسملة"); an empty one
+  (`% $`, 0795IbnRajabHanbali.KalimatIkhsas) is dropped as markup.
+- A verse placeholder merged with neighbouring text by the bridge is still
+  substituted instead of printing `VRSDVERSE…`.
+
+## 1.3.0
 
 1.2.7 was bumped on `main` but never tagged or published; its changes ship
 here. Everything below is relative to the published 1.2.6.

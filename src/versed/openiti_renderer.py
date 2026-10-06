@@ -142,35 +142,76 @@ def _align_rendered_to_source(rendered: str, source: str) -> Tuple[list[int], fr
     return offsets, frozenset(synthetic)
 
 
-def _visual_line_text(
-    layout_bytes: bytes, line: Any, synthetic: Collection[int]
-) -> list[tuple[str, int]]:
-    """Return one laid-out line's characters in visual (left-to-right) order.
+VisualRun = Tuple[int, list[Tuple[str, int]]]
 
-    Each character carries its logical byte offset. Pango lists a line's
-    runs in visual order; the characters of a right-to-left run are reversed
-    one by one. This is how PDFs store shaped RTL text: glyphs left to right,
-    each mapped to one character, which readers turn back into logical order.
+
+def _bidi_runs(chars: list[tuple[str, int]], rtl: bool, context: Any) -> list[VisualRun]:
+    """Split logical characters into UAX #9 level runs, in visual order.
+
+    Returns ``(level, characters)`` pairs; an odd level is right-to-left and
+    its characters are listed in visual order (reversed). Pango's own bidi
+    implementation (FriBidi) resolves the levels. The drawn layout uses
+    isolates (LRI/PDI) that the copied text does not carry, and readers
+    rebuild logical order by running the bidi algorithm on the glyphs without
+    them, so the runs are resolved on the isolate-free text.
     """
-    pieces: list[tuple[str, int]] = []
+    from gi.repository import Pango
+
+    prefix = RLM if rtl else "\u200e"
+    text = prefix + "".join(char for char, _ in chars)
+    layout = Pango.Layout.new(context)
+    layout.set_auto_dir(True)
+    layout.set_text(text, -1)
+    encoded = text.encode("utf-8")
+    starts: dict[int, int] = {}
+    byte = len(prefix.encode("utf-8"))
+    for index, (char, _) in enumerate(chars):
+        starts[byte] = index
+        byte += len(char.encode("utf-8"))
+    runs: list[VisualRun] = []
+    for line in layout.get_lines_readonly():
+        for run in line.runs or []:
+            item = run.item
+            run_chars = []
+            offset = item.offset
+            for char in encoded[item.offset : item.offset + item.length].decode("utf-8"):
+                if offset in starts:
+                    run_chars.append(chars[starts[offset]])
+                offset += len(char.encode("utf-8"))
+            if run_chars:
+                level = item.analysis.level
+                runs.append((level, run_chars[::-1] if level % 2 else run_chars))
+    return runs
+
+
+def _visual_line_runs(
+    layout_bytes: bytes, line: Any, synthetic: Collection[int], context: Any
+) -> list[VisualRun]:
+    """Return one laid-out line's text as bidi runs in visual order.
+
+    Characters carry their logical byte offset; isolates and synthetic
+    tatweel are dropped. A right-to-left line starts with a RIGHT-TO-LEFT
+    MARK run (the line's logical end): readers that rebuild direction from
+    the glyph stream (MuPDF) otherwise read a final vowel mark or closing
+    quote at the left edge as left-to-right and move it.
+    """
+    logical: list[tuple[str, int]] = []
     right_to_left = False
     for run in line.runs or []:
         item = run.item
         right_to_left = right_to_left or bool(item.analysis.level % 2)
-        chars: list[tuple[str, int]] = []
         offset = item.offset
         for char in layout_bytes[item.offset : item.offset + item.length].decode("utf-8"):
             if char not in (LRI, PDI, "\n") and not (char == TATWEEL and offset in synthetic):
-                chars.append((char, offset))
+                logical.append((char, offset))
             offset += len(char.encode("utf-8"))
-        pieces.extend(reversed(chars) if item.analysis.level % 2 else chars)
-    if pieces and right_to_left:
-        # A RIGHT-TO-LEFT MARK first in the stream (the line's logical end)
-        # tells readers that rebuild direction from the glyph stream (MuPDF)
-        # that the line is RTL; without it a final vowel mark or closing
-        # quote at the left edge is read as left-to-right and moved.
-        pieces.insert(0, (RLM, -1))
-    return pieces
+    if not logical:
+        return []
+    logical.sort(key=lambda pair: pair[1])
+    runs = _bidi_runs(logical, right_to_left, context)
+    if right_to_left:
+        runs.insert(0, (1, [(RLM, -1)]))
+    return runs
 
 
 _SEMANTIC_FONT_CANDIDATES = (
@@ -259,9 +300,21 @@ def _semantic_fonts(text: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
     return fonts, char_font
 
 
+def _font_groups(chars: list[str], char_font: dict[str, int]) -> list[tuple[int, list[str]]]:
+    """Group consecutive characters by font; the RLM anchor stays alone."""
+    groups: list[tuple[int, list[str]]] = []
+    for char in chars:
+        index = char_font[char]
+        if groups and groups[-1][0] == index and RLM not in (char, groups[-1][1][-1]):
+            groups[-1][1].append(char)
+        else:
+            groups.append((index, [char]))
+    return groups
+
+
 def _attach_semantic_text_layer(
     out_path: str,
-    page_text: dict[int, list[tuple[list[tuple[str, int]], float, float, float, float]]],
+    page_text: dict[int, list[tuple[list[VisualRun], float, float, float, float]]],
 ) -> None:
     """Add an invisible, searchable text layer over the Cairo vector pages.
 
@@ -277,11 +330,25 @@ def _attach_semantic_text_layer(
     of MuPDF and Poppler text (PDFKit ignores ActualText and returns it as
     an invisible U+200F at the line end).
 
-    Rejected after measuring PyMuPDF, Poppler and PDFKit: line-level
-    ``/ActualText`` spans (MuPDF and Poppler spread the replacement string
-    over the glyph positions and reverse it; PDFKit ignores it), Cairo's own
-    text (``show_layout``: split words and presentation forms in all three),
-    and logical-order glyphs placed right to left (PDFKit reverses them).
+    Glyph order is UAX #9 visual order of the isolate-free line text, one
+    text object per line. Measured against PyMuPDF, Poppler and PDFKit:
+
+    - PDFKit reads the glyph stream and re-runs bidi: exact for Arabic,
+      digits (Western and Arabic-Indic), brackets and embedded Latin.
+    - Poppler sorts by position: exact for Arabic; next to an LTR run (digits,
+      Latin) its RTL dump puts the separating space on the wrong side
+      ("681بدمشق"). A Chrome-printed PDF of the same text extracts the same
+      way, so this is Poppler's reorder, not the glyph order.
+    - MuPDF keeps direction fragments in stream order: exact for Arabic,
+      but digits and Latin inside an Arabic line come out of place. Writing
+      the runs in logical order puts MuPDF's runs in place but breaks PDFKit,
+      which is preferred (Archive.org search uses pdftotext-style text).
+
+    Also rejected: line-level ``/ActualText`` (MuPDF and Poppler reverse it,
+    PDFKit ignores it), per-bracket ``/ActualText`` with the mirrored
+    character (all three then mirror brackets, PDFKit included), Cairo's own text (split words and presentation forms
+    in all three), spaces as positional gaps (no change), and one text object
+    per bidi run in visual order (worse in MuPDF).
     """
     try:
         import fitz
@@ -292,7 +359,11 @@ def _attach_semantic_text_layer(
         ) from exc
 
     all_text = "".join(
-        char for lines in page_text.values() for line in lines for char, _ in line[0]
+        char
+        for lines in page_text.values()
+        for line in lines
+        for _, chars in line[0]
+        for char, _ in chars
     )
     if not all_text.strip():
         return
@@ -310,44 +381,36 @@ def _attach_semantic_text_layer(
                 page_height = page.rect.height
                 operators: list[str] = []
                 used: set[int] = set()
-                for visual, x, baseline, width, height in lines:
-                    runs: list[tuple[int, list[str]]] = []
-                    for char, _ in visual:
-                        if char not in char_font:
-                            continue
-                        index = char_font[char]
-                        if runs and runs[-1][0] == index and RLM not in (char, runs[-1][1][-1]):
-                            runs[-1][1].append(char)
-                        else:
-                            runs.append((index, [char]))
-                    natural = sum(
-                        fonts[index]["advance"][char] for index, chars in runs for char in chars
-                    )
-                    if not runs or natural <= 0:
+                for runs, x, baseline, width, height in lines:
+                    chars = [
+                        char for _, run in runs for char, _ in run if char in char_font
+                    ]
+                    natural = sum(fonts[char_font[char]]["advance"][char] for char in chars)
+                    if not chars or natural <= 0:
                         continue
                     font_size = max(4.0, height * 0.75)
                     scale = 100.0 * width / (natural * font_size) if width > 0 else 100.0
                     shows = []
-                    for index, chars in runs:
+                    for index, group in _font_groups(chars, char_font):
                         used.add(index)
-                        glyphs = "".join(f"{fonts[index]['glyph'][char]:04X}" for char in chars)
+                        glyphs = "".join(f"{fonts[index]['glyph'][char]:04X}" for char in group)
                         show = f"/{fonts[index]['name']} {font_size:.2f} Tf <{glyphs}> Tj"
-                        if chars == [RLM]:
+                        if group == [RLM]:
                             # The direction anchor is not text: an empty
                             # /ActualText keeps it out of copied text in
                             # readers that honour it (MuPDF, Poppler).
                             show = f"/Span <</ActualText ()>> BDC {show} EMC"
                         shows.append(show)
                     operators.append(
-                        f"{scale:.2f} Tz 1 0 0 1 {x:.2f} {page_height - baseline:.2f} Tm "
-                        + " ".join(shows)
+                        f"BT 3 Tr {scale:.2f} Tz 1 0 0 1 {x:.2f} "
+                        f"{page_height - baseline:.2f} Tm " + " ".join(shows) + " ET"
                     )
                 if not operators:
                     continue
                 page.wrap_contents()
                 for index in sorted(used):
                     page.insert_font(fontname=fonts[index]["name"], fontbuffer=fonts[index]["bytes"])
-                stream = "q BT 3 Tr\n" + "\n".join(operators) + "\nET Q\n"
+                stream = "q\n" + "\n".join(operators) + "\nQ\n"
                 xref = pdf.get_new_xref()
                 pdf.update_object(xref, "<<>>")
                 pdf.update_stream(xref, stream.encode("ascii"))
@@ -369,6 +432,49 @@ def _configure_pango_backend(
     env = os.environ if environ is None else environ
     if platform == "darwin":
         env.setdefault("PANGOCAIRO_BACKEND", "fc")
+
+
+def _resolved_font_family(family: str, sample: str = "بسم الله الرحمن الرحيم") -> str:
+    """Return the family Pango actually uses to draw ``sample`` in ``family``.
+
+    Pango silently substitutes another face when the requested one is not
+    installed, or falls back per glyph when the face lacks a character;
+    callers compare the result with the request.
+    """
+    _configure_pango_backend()
+    import cairo
+    import gi
+
+    gi.require_version("Pango", "1.0")
+    gi.require_version("PangoCairo", "1.0")
+    from gi.repository import Pango, PangoCairo
+
+    surface = cairo.ImageSurface(cairo.FORMAT_A8, 8, 8)
+    context = PangoCairo.create_layout(cairo.Context(surface)).get_context()
+    font = context.load_font(Pango.FontDescription.from_string(f"{family} 12"))
+    if font is None:
+        return ""
+    resolved = font.describe().get_family() or ""
+    coverage = font.get_coverage(Pango.Language.from_string("ar"))
+    missing = [
+        char for char in sample
+        if not char.isspace() and coverage.get(ord(char)) == Pango.CoverageLevel.NONE
+    ]
+    if missing:
+        return f"{resolved} (lacks {''.join(missing)}; per-glyph fallback)"
+    return resolved
+
+
+def _require_font_family(family: str) -> None:
+    """Fail loudly instead of typesetting a book in a substituted face."""
+    used = _resolved_font_family(family)
+    if used.lower() != family.lower():
+        raise RuntimeError(
+            f"OpenITI font {family!r} is not available to Pango (it would use {used!r}). "
+            "Install it and refresh fontconfig, e.g. on macOS "
+            "`brew install --cask font-amiri && fc-cache -f`, on Debian/Ubuntu "
+            "`apt install fonts-hosny-amiri`."
+        )
 
 
 def _format_entry_heading(text: str) -> str:
@@ -655,6 +761,8 @@ def render_book(
 
     theme = THEMES.get(theme_name, THEMES["scholarly"])
     W, H = theme.page_w, theme.page_h
+    for family in dict.fromkeys((theme.font_body, theme.font_heading)):
+        _require_font_family(family)
 
     surface = cairo.PDFSurface(out_path, W, H)
     cr = cairo.Context(surface)
@@ -664,7 +772,7 @@ def render_book(
     current_chapter = doc.title or ""
     current_section = ""
     all_word_coords: list[dict] = []
-    semantic_page_text: dict[int, list[tuple[list[tuple[str, int]], float, float, float, float]]] = {}
+    semantic_page_text: dict[int, list[tuple[list[VisualRun], float, float, float, float]]] = {}
     current_block_index = 0
     pending_apparatus_notes: list[str] = []
     active_apparatus_notes: list[str] = []
@@ -706,8 +814,8 @@ def render_book(
             line = line_iter.get_line_readonly()
             _, logical = line.get_pixel_extents()
             _, layout_logical = line_iter.get_line_extents()
-            visual = _visual_line_text(rendered_bytes, line, synthetic)
-            if any(not char.isspace() for char, _ in visual):
+            visual = _visual_line_runs(rendered_bytes, line, synthetic, layout.get_context())
+            if any(not char.isspace() for _, chars in visual for char, _ in chars):
                 page_lines.append(
                     (
                         visual,
@@ -1099,14 +1207,16 @@ def render_book(
         y += 10
 
     def draw_verse_number(number: Optional[str], row_y: float) -> None:
-        """Print a source verse number in the outer margin, outside the word stream."""
+        """Print a source verse number in the margin opposite the page markers, outside the word stream."""
         if not number:
             return
         cr.set_source_rgb(*theme.color_page_ref)
         number_layout = make_layout(font_size=theme.size_page_ref, width=30)
         number_layout.set_alignment(Pango.Alignment.CENTER)
         number_layout.set_text(f"({str(number).strip('()').translate(W2E)})", -1)
-        x = W - mr() + 4 if page_num % 2 == 0 else ml() - 34
+        # Page markers take the outer margin (right on even pages, left on
+        # odd); verse numbers take the other one so the two never collide.
+        x = ml() - 34 if page_num % 2 == 0 else W - mr() + 4
         cr.move_to(x, row_y + 2)
         paint_layout(number_layout)
 

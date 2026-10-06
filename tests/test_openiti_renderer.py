@@ -480,3 +480,120 @@ def test_page_split_chunks_do_not_rewrap_past_the_bottom_margin(tmp_path):
         assert box["y"] + box["height"] <= theme.page_h - theme.margin_bottom + 0.5
     pages = sorted({box["page"] for box in coords})
     assert pages == list(range(pages[0], pages[-1] + 1)), "a split left an empty page"
+
+
+# Mixed-direction lines. The text layer stores UAX #9 visual order of the
+# isolate-free text, so readers that re-run bidi on the glyph stream (PDFKit)
+# round-trip exactly. Poppler and MuPDF use their own reordering; the cases
+# they cannot satisfy are marked xfail with what they return (a Chrome-printed
+# PDF of the same text extracts the same way in both).
+MIXED_FIXTURES = {
+    "paren_footnote": "قَالَ ابْنُ سِينَا (2) فِي كِتَابِهِ",
+    "western_digits": "مَاتَ سَنَةَ 681 بِدِمَشْقَ",
+    "indic_digits": "مَاتَ سَنَةَ ٦٨١ بِدِمَشْقَ",
+    "hijri_year": "تُوُفِّيَ سَنَةَ 902هـ بِالْقَاهِرَةِ",
+    "latin_title": "وَقَرَأَ كِتَابَ The Canon of Medicine عَلَى شَيْخِهِ",
+    "comma_after_digit": "فِي الْجُزْءِ 3، الصَّفْحَةِ ١٢، وَغَيْرِهَا",
+}
+
+_POPPLER_EXACT = {"hijri_year"}
+# Poppler's RTL dump moves the space beside a number to its other side.
+_POPPLER_SPACING_ONLY = {"western_digits", "indic_digits"}
+
+
+def _mixed_text(extractor, fixture, tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    doc = ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, MIXED_FIXTURES[fixture])])
+    path, _ = _render(doc, tmp_path)
+    return {
+        "mupdf": lambda: _mupdf_text(path),
+        "poppler": lambda: _poppler_text(path),
+        "pdfkit": lambda: _pdfkit_text(path, tmp_path),
+    }[extractor]()
+
+
+@pytest.mark.parametrize("fixture", sorted(MIXED_FIXTURES))
+def test_pdfkit_round_trips_digits_brackets_and_latin_in_arabic(tmp_path, fixture):
+    text = _mixed_text("pdfkit", fixture, tmp_path)
+    assert _norm_ws(MIXED_FIXTURES[fixture]) in _norm_ws(text)
+
+
+@pytest.mark.parametrize("fixture", sorted(MIXED_FIXTURES))
+def test_poppler_mixed_direction_lines(tmp_path, fixture, request):
+    text = _mixed_text("poppler", fixture, tmp_path)
+    source = MIXED_FIXTURES[fixture]
+    if fixture in _POPPLER_EXACT:
+        assert _norm_ws(source) in _norm_ws(text)
+    elif fixture in _POPPLER_SPACING_ONLY:
+        squeeze = lambda value: "".join(_norm_ws(value).split())
+        assert squeeze(source) in squeeze(text)
+    else:
+        request.node.add_marker(pytest.mark.xfail(reason="Poppler reorders brackets/marks next to LTR runs"))
+        assert _norm_ws(source) in _norm_ws(text)
+
+
+def test_render_fails_loudly_when_the_body_font_is_substituted(tmp_path, monkeypatch):
+    # This Mac rendered "Amiri" with AlNile / DecoType Naskh for months because
+    # fontconfig had no Amiri; the renderer must refuse instead.
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed import openiti_renderer
+
+    theme = openiti_renderer.BookTheme(name="missing", font_body="Versed No Such Face")
+    monkeypatch.setitem(openiti_renderer.THEMES, "missing_face", theme)
+    doc = ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, "بسم الله الرحمن الرحيم")])
+    with pytest.raises(RuntimeError, match="Versed No Such Face"):
+        _render(doc, tmp_path, theme_name="missing_face")
+
+
+def test_bundled_themes_resolve_their_requested_faces():
+    from versed.openiti_renderer import THEMES, _resolved_font_family
+
+    for theme in THEMES.values():
+        for family in {theme.font_body, theme.font_heading}:
+            assert _resolved_font_family(family).lower() == family.lower()
+
+
+def test_verse_numbers_and_page_markers_use_opposite_margins(tmp_path, monkeypatch):
+    # 0466IbnSinanKhafaji.Diwan: "(١٢)" was drawn over "[ص ١٦٧]".
+    from versed import openiti_renderer
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    captured = {}
+    original = openiti_renderer._attach_semantic_text_layer
+
+    def capture(out_path, page_text):
+        captured.update(page_text)
+        return original(out_path, page_text)
+
+    monkeypatch.setattr(openiti_renderer, "_attach_semantic_text_layer", capture)
+    blocks = []
+    for number in range(1, 80):
+        blocks.append(Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": number}))
+        blocks.append(Block(
+            BlockType.VERSE_PAIR, "", hemistich_a="قفا نبك من ذكرى حبيب ومنزل",
+            hemistich_b="بسقط اللوى بين الدخول فحومل", meta={"verse_number": str(number)},
+        ))
+    _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    def boxes(lines, test):
+        found = []
+        for runs, x, baseline, width, height in lines:
+            text = "".join(char for _, run in runs for char, _ in run)
+            if test(text):
+                found.append((x, baseline - height, x + width, baseline))
+        return found
+
+    checked = 0
+    for lines in captured.values():
+        refs = boxes(lines, lambda text: "ص" in text)
+        numbers = boxes(lines, lambda text: "(" in text and "ص" not in text)
+        for ref in refs:
+            for number in numbers:
+                checked += 1
+                overlap = (
+                    min(ref[2], number[2]) > max(ref[0], number[0])
+                    and min(ref[3], number[3]) > max(ref[1], number[1])
+                )
+                assert not overlap, (ref, number)
+    assert checked

@@ -336,3 +336,91 @@ def test_scheme_repeated_biography_tag_is_not_printed():
     assert [(block.type, block.text) for block in doc.blocks] == [
         (BlockType.BIO_MAN, "أحمد بن حنبل"),
     ]
+
+
+def test_hemistich_divider_without_words_on_both_sides_is_not_a_couplet():
+    # 0671AbuCabdAllahQurtubi.Asna: OCR margin noise carries %~% ("قدهة 1 %~% 11").
+    # A couplet needs words on both sides; otherwise keep the line as one
+    # verse line, every character preserved.
+    doc = _parse_body(
+        "# قدهة 1 %~% 11\n"
+        "# 4 %~% \n"
+        "# وذلك في ذات الإله وإن يشا %~% يبارك على أوصال شلو ممزع\n"
+    )
+
+    shapes = [(block.type, block.text, block.hemistich_a, block.hemistich_b) for block in doc.blocks]
+    assert shapes == [
+        (BlockType.VERSE_LINE, "قدهة 1 11", "", ""),
+        (BlockType.VERSE_LINE, "4", "", ""),
+        (BlockType.VERSE_PAIR, "", "وذلك في ذات الإله وإن يشا", "يبارك على أوصال شلو ممزع"),
+    ]
+
+
+def test_text_after_a_line_initial_page_marker_is_kept():
+    # 0711IbnIbrahimCimadDinWasiti.Tadhkira: "PageV01P023 وتسديدهم ..." at the
+    # start of a continuation line lost every word after the marker.
+    doc = _parse_body(
+        "# وأدام توفيق السادة المبدئ بذكرهم\n"
+        "PageV01P023 وتسديدهم، وأجزل لهم حظهم، ومزيدهم\n"
+        "# السلام عليكم\n"
+    )
+
+    assert _printed_words(doc) == (
+        "وأدام توفيق السادة المبدئ بذكرهم وتسديدهم، وأجزل لهم حظهم، ومزيدهم السلام عليكم"
+    ).split()
+    assert any(block.type == BlockType.PAGE_REF and block.meta == {"vol": 1, "page": 23} for block in doc.blocks)
+
+
+def test_glued_page_markers_keep_the_text_after_them():
+    # 0625AbuMuhammadIbnRushd.HalYattasilBiCaql opens with five page anchors
+    # written without spaces; the text after them was dropped.
+    doc = _parse_body("PageV01P298PageV01P300PageV01P302 بسم الله الرحمن الرحيم قال الفقيه\n")
+
+    assert _printed_words(doc) == "بسم الله الرحمن الرحيم قال الفقيه".split()
+    # The bridge keeps the first of consecutive anchors with no text between
+    # them; the empty pages carry no words.
+    assert [block.meta["page"] for block in doc.blocks if block.type == BlockType.PAGE_REF][:1] == [298]
+
+
+def test_header_lines_are_not_printed_as_body_text():
+    # 0720IbnCumarKurdi.Juz has a "#NewRec#" line inside the metadata header.
+    raw = (
+        "######OpenITI#\n"
+        "#META# 010.AuthorNAME :: الكردي\n"
+        "#NewRec# 010.AuthorNAME\t:: الحسن بن عمر الكردي\n"
+        "#META#Header#End#\n\n"
+        "# جزء فيه حديث\n"
+    )
+    assert _printed_words(parse_openiti(raw)) == "جزء فيه حديث".split()
+
+
+def test_folio_page_markers_after_a_verse_keep_the_verse():
+    # 1357IstifanThani.ZajaliyyatHarb marks folio sides ("PageV01P003b").
+    doc = _parse_body(
+        "وصوط الله عن بينادي %~% توبوا والا تهلكون\n"
+        "PageV01P003b\n"
+        "# بعده نص\n"
+    )
+
+    assert _printed_words(doc) == "وصوط الله عن بينادي توبوا والا تهلكون بعده نص".split()
+    assert "b" not in _printed_words(doc)
+
+
+def test_inline_title_inside_a_percent_verse_line_is_a_title():
+    # 0833IbnJazari.DurraMudiyya: "... أسجلا % $ & باب ~~البسملة وأم القرآن"
+    doc = _parse_body(
+        "# % وإن كلمة أطلقت فالشهرة اعتمد % % كذلك تعريفا وتنكيرا أسجلا % $ & باب\n"
+        "~~البسملة وأم القرآن\n"
+    )
+
+    assert [(block.type, block.text or block.hemistich_a) for block in doc.blocks] == [
+        (BlockType.VERSE_PAIR, "وإن كلمة أطلقت فالشهرة اعتمد"),
+        (BlockType.TITLE, "& باب البسملة وأم القرآن"),
+    ]
+
+
+def test_empty_inline_title_marker_in_a_verse_line_is_not_printed():
+    # 0795IbnRajabHanbali.KalimatIkhsas ends verse runs with "% $".
+    doc = _parse_body("# % إذا أنا لم أجد من الحب وصلا % رمت في النار منزلا ومقيلا % $\n")
+
+    assert _printed_words(doc) == "إذا أنا لم أجد من الحب وصلا رمت في النار منزلا ومقيلا".split()

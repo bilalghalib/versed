@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -101,7 +102,10 @@ class ParsedDocument:
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
-PAGE_TAG = re.compile(r"\bPageV(\d+)P(\d+)\b")
+# Page anchors may be glued together ("PageV01P298PageV01P300"); a letter
+# before "Page" means another scheme element (PageWrongV…, StartingPageV…).
+# Some sources add a folio side ("PageV01P003b"), absorbed with the anchor.
+PAGE_TAG = re.compile(r"(?<![A-Za-z])PageV(\d+)P(\d+)(?:[ab](?![A-Za-z]))?")
 MS_TAG = re.compile(r"\bms\d+\b|\b\d+ms\b")
 MILESTONE = re.compile(r"\bMilestone\d+\b")
 APPARATUS_SEP = re.compile(r"\s+\+\s+")
@@ -177,10 +181,26 @@ def _resolve_parser_cwd() -> str:
 
 def _normalize_input_for_openiti_parser(text: str) -> str:
     normalized_lines: List[str] = []
+    in_body = META_END not in text
     for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not in_body:
+            # Header lines (#META#, #NewRec#, ...) are not body text.
+            normalized_lines.append(raw_line)
+            in_body = META_END in raw_line
+            continue
+        # The bridge only sees space-separated page anchors.
+        raw_line = re.sub(r"(PageV\d+P\d+)(?=PageV)", r"\1 ", raw_line)
         stripped = raw_line.strip()
         if not stripped:
             normalized_lines.append(raw_line)
+            continue
+
+        page_lead = PAGE_TAG.match(stripped)
+        if page_lead and stripped[page_lead.end():].strip():
+            # "PageV01P023 text": the page ends inside a running paragraph and
+            # the text continues it; as its own line the bridge drops the text.
+            normalized_lines.append(f"~~{stripped}")
             continue
 
         if stripped.startswith(("######OpenITI", "#META#", "### ", "# ", "#~:", "~~", "PageV", "ms", "Milestone")):
@@ -235,7 +255,22 @@ def _strip_scheme_markup(text: str) -> str:
     return "\n".join(lines)
 
 
-_VERSE_PLACEHOLDER = re.compile(r"^VRSDVERSE(\d+)$")
+def _has_words(text: str) -> bool:
+    return any(unicodedata.category(char).startswith("L") for char in text)
+
+
+def _verse_block(first: str, second: str) -> Block:
+    """A couplet needs words on both sides of the divider.
+
+    OCR margin noise in some sources carries the divider (``قدهة 1 %~% 11``);
+    such a line stays one verse line with every character kept.
+    """
+    if _has_words(first) and _has_words(second):
+        return Block(BlockType.VERSE_PAIR, "", hemistich_a=first, hemistich_b=second)
+    return Block(BlockType.VERSE_LINE, " ".join(part for part in (first, second) if part))
+
+
+_VERSE_TOKEN = re.compile(r"\bVRSDVERSE(\d+)\b")
 _VERSE_NUMBER = re.compile(r"^\(?[0-9٠-٩]+\)?$")
 _PERCENT_VERSE_LINE = re.compile(r"^#?\s*%")
 
@@ -262,10 +297,7 @@ def _percent_verse_blocks(body: str) -> List[Block]:
 
     def flush() -> None:
         for index in range(0, len(pending) - 1, 2):
-            blocks.append(Block(
-                BlockType.VERSE_PAIR, "",
-                hemistich_a=pending[index], hemistich_b=pending[index + 1],
-            ))
+            blocks.append(_verse_block(pending[index], pending[index + 1]))
         if len(pending) % 2:
             blocks.append(Block(BlockType.VERSE_LINE, pending[-1]))
         pending.clear()
@@ -282,8 +314,33 @@ def _percent_verse_blocks(body: str) -> List[Block]:
             continue
         if segment.endswith(" |"):
             segment = segment[:-2].rstrip()
+        if segment == "$":
+            # An inline title separator with no title: markup only.
+            continue
+        if segment.startswith("$ "):
+            # Inline title separator (" $ ") inside a verse line.
+            flush()
+            blocks.append(Block(BlockType.TITLE, segment[2:].strip(), level=2, meta={"marker": "$"}))
+            continue
         pending.append(segment)
     flush()
+    return blocks
+
+
+def _canonical_verse_blocks(body: str) -> List[Block]:
+    """Parse one ``%~%`` verse line (scheme "In-text Elements").
+
+    Hemistichs pair in source order; an odd last one is a verse line. The
+    upstream parser turns a trailing divider ("4 %~%") into prose "4 ~".
+    """
+    segments = [_strip_inline_markers(part).strip() for part in HEMI_MARK.split(body)]
+    segments = [part for part in segments if part]
+    blocks = [
+        _verse_block(segments[index], segments[index + 1])
+        for index in range(0, len(segments) - 1, 2)
+    ]
+    if len(segments) % 2:
+        blocks.append(Block(BlockType.VERSE_LINE, segments[-1]))
     return blocks
 
 
@@ -309,7 +366,12 @@ def _extract_percent_verses(text: str) -> Tuple[str, List[List[Block]]]:
         if stripped.startswith("#") and stripped[1:2] not in ("", " ", "%"):
             out.append(raw_line)
             continue
-        if not _PERCENT_VERSE_LINE.match(stripped):
+        canonical = bool(HEMI_MARK.search(stripped)) and not (
+            RWY_MARKER.search(stripped.lstrip("#").strip())
+            or APPARATUS_SEP.search(stripped)
+            or INLINE_TITLE_SEP.search(stripped)
+        )
+        if not canonical and not _PERCENT_VERSE_LINE.match(stripped):
             out.append(raw_line)
             continue
         logical = stripped.lstrip("#").strip()
@@ -317,7 +379,10 @@ def _extract_percent_verses(text: str) -> Tuple[str, List[List[Block]]]:
             logical += " " + lines[index].lstrip()[2:].strip()
             index += 1
         pages = PAGE_TAG.findall(logical)
-        blocks = _percent_verse_blocks(PAGE_TAG.sub(" ", logical))
+        if canonical:
+            blocks = _canonical_verse_blocks(PAGE_TAG.sub(" ", logical))
+        else:
+            blocks = _percent_verse_blocks(PAGE_TAG.sub(" ", logical))
         if not blocks:
             out.append(raw_line)
             continue
@@ -447,7 +512,9 @@ def _block_from_external_context(raw_line: str, content: str, external_block: Op
     if HEMI_MARK.search(content):
         parts = [part.strip() for part in HEMI_MARK.split(content) if part.strip()]
         if len(parts) == 2:
-            return Block(BlockType.VERSE_PAIR, "", hemistich_a=parts[0], hemistich_b=parts[1])
+            return _verse_block(parts[0], parts[1])
+        if len(parts) == 1:
+            return Block(BlockType.VERSE_LINE, parts[0])
         return Block(BlockType.VERSE_LINE, content)
 
     if BASMALA_PAT.match(content):
@@ -474,7 +541,7 @@ def _block_from_external_context(raw_line: str, content: str, external_block: Op
     if external_block and external_block.get("type") == "verse":
         parts = [str(part).strip() for part in external_block.get("content", []) if str(part).strip()]
         if len(parts) == 2:
-            return Block(BlockType.VERSE_PAIR, "", hemistich_a=parts[0], hemistich_b=parts[1])
+            return _verse_block(parts[0], parts[1])
         return Block(BlockType.VERSE_LINE, content)
 
     return Block(BlockType.PARAGRAPH, content)
@@ -659,11 +726,7 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
 
             elif btype == "verse":
                 if len(content_parts) == 2:
-                    doc.blocks.append(Block(
-                        BlockType.VERSE_PAIR, "",
-                        hemistich_a=content_parts[0],
-                        hemistich_b=content_parts[1],
-                    ))
+                    doc.blocks.append(_verse_block(content_parts[0], content_parts[1]))
                 else:
                     doc.blocks.append(Block(BlockType.VERSE_LINE, content_str))
 
@@ -686,9 +749,14 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 # Default: paragraph — apply inline classification
                 # Skip stray markup artifacts (lone #, empty content)
                 cleaned = _strip_inline_markers(content_str)
-                placeholder = _VERSE_PLACEHOLDER.match(cleaned)
-                if placeholder and int(placeholder.group(1)) < len(percent_verses):
-                    doc.blocks.extend(percent_verses[int(placeholder.group(1))])
+                if _VERSE_TOKEN.search(cleaned):
+                    # Verses the bridge merged with neighbouring text are
+                    # still substituted; the text around them is kept.
+                    for piece in _VERSE_TOKEN.split(content_str):
+                        if piece.isdigit() and int(piece) < len(percent_verses):
+                            doc.blocks.extend(percent_verses[int(piece)])
+                        elif _strip_inline_markers(piece):
+                            doc.blocks.extend(_layout_blocks_from_content(piece.strip(), ext_block))
                     continue
                 if not cleaned or cleaned in ("#", "##", "###"):
                     continue
