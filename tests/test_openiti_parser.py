@@ -369,3 +369,38 @@ def test_text_after_a_line_initial_page_marker_is_kept():
         "وأدام توفيق السادة المبدئ بذكرهم وتسديدهم، وأجزل لهم حظهم، ومزيدهم السلام عليكم"
     ).split()
     assert any(block.type == BlockType.PAGE_REF and block.meta == {"vol": 1, "page": 23} for block in doc.blocks)
+
+
+def test_glued_page_markers_keep_the_text_after_them():
+    # 0625AbuMuhammadIbnRushd.HalYattasilBiCaql opens with five page anchors
+    # written without spaces; the text after them was dropped.
+    doc = _parse_body("PageV01P298PageV01P300PageV01P302 بسم الله الرحمن الرحيم قال الفقيه\n")
+
+    assert _printed_words(doc) == "بسم الله الرحمن الرحيم قال الفقيه".split()
+    # The bridge keeps the first of consecutive anchors with no text between
+    # them; the empty pages carry no words.
+    assert [block.meta["page"] for block in doc.blocks if block.type == BlockType.PAGE_REF][:1] == [298]
+
+
+def test_header_lines_are_not_printed_as_body_text():
+    # 0720IbnCumarKurdi.Juz has a "#NewRec#" line inside the metadata header.
+    raw = (
+        "######OpenITI#\n"
+        "#META# 010.AuthorNAME :: الكردي\n"
+        "#NewRec# 010.AuthorNAME\t:: الحسن بن عمر الكردي\n"
+        "#META#Header#End#\n\n"
+        "# جزء فيه حديث\n"
+    )
+    assert _printed_words(parse_openiti(raw)) == "جزء فيه حديث".split()
+
+
+def test_folio_page_markers_after_a_verse_keep_the_verse():
+    # 1357IstifanThani.ZajaliyyatHarb marks folio sides ("PageV01P003b").
+    doc = _parse_body(
+        "وصوط الله عن بينادي %~% توبوا والا تهلكون\n"
+        "PageV01P003b\n"
+        "# بعده نص\n"
+    )
+
+    assert _printed_words(doc) == "وصوط الله عن بينادي توبوا والا تهلكون بعده نص".split()
+    assert "b" not in _printed_words(doc)

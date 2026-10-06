@@ -102,7 +102,10 @@ class ParsedDocument:
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
-PAGE_TAG = re.compile(r"\bPageV(\d+)P(\d+)\b")
+# Page anchors may be glued together ("PageV01P298PageV01P300"); a letter
+# before "Page" means another scheme element (PageWrongV…, StartingPageV…).
+# Some sources add a folio side ("PageV01P003b"), absorbed with the anchor.
+PAGE_TAG = re.compile(r"(?<![A-Za-z])PageV(\d+)P(\d+)(?:[ab](?![A-Za-z]))?")
 MS_TAG = re.compile(r"\bms\d+\b|\b\d+ms\b")
 MILESTONE = re.compile(r"\bMilestone\d+\b")
 APPARATUS_SEP = re.compile(r"\s+\+\s+")
@@ -178,7 +181,16 @@ def _resolve_parser_cwd() -> str:
 
 def _normalize_input_for_openiti_parser(text: str) -> str:
     normalized_lines: List[str] = []
+    in_body = META_END not in text
     for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not in_body:
+            # Header lines (#META#, #NewRec#, ...) are not body text.
+            normalized_lines.append(raw_line)
+            in_body = META_END in raw_line
+            continue
+        # The bridge only sees space-separated page anchors.
+        raw_line = re.sub(r"(PageV\d+P\d+)(?=PageV)", r"\1 ", raw_line)
         stripped = raw_line.strip()
         if not stripped:
             normalized_lines.append(raw_line)
@@ -258,7 +270,7 @@ def _verse_block(first: str, second: str) -> Block:
     return Block(BlockType.VERSE_LINE, " ".join(part for part in (first, second) if part))
 
 
-_VERSE_PLACEHOLDER = re.compile(r"^VRSDVERSE(\d+)$")
+_VERSE_TOKEN = re.compile(r"\bVRSDVERSE(\d+)\b")
 _VERSE_NUMBER = re.compile(r"^\(?[0-9٠-٩]+\)?$")
 _PERCENT_VERSE_LINE = re.compile(r"^#?\s*%")
 
@@ -729,9 +741,14 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 # Default: paragraph — apply inline classification
                 # Skip stray markup artifacts (lone #, empty content)
                 cleaned = _strip_inline_markers(content_str)
-                placeholder = _VERSE_PLACEHOLDER.match(cleaned)
-                if placeholder and int(placeholder.group(1)) < len(percent_verses):
-                    doc.blocks.extend(percent_verses[int(placeholder.group(1))])
+                if _VERSE_TOKEN.search(cleaned):
+                    # Verses the bridge merged with neighbouring text are
+                    # still substituted; the text around them is kept.
+                    for piece in _VERSE_TOKEN.split(content_str):
+                        if piece.isdigit() and int(piece) < len(percent_verses):
+                            doc.blocks.extend(percent_verses[int(piece)])
+                        elif _strip_inline_markers(piece):
+                            doc.blocks.extend(_layout_blocks_from_content(piece.strip(), ext_block))
                     continue
                 if not cleaned or cleaned in ("#", "##", "###"):
                     continue

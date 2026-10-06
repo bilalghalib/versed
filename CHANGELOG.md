@@ -19,6 +19,22 @@
   for Arabic. On the build Mac, "Amiri" had been resolving to AlNile and
   DecoType Naskh (a broken Amiri download was an HTML file).
 
+### OpenITI parser
+
+- Every Arabic source word now reaches the block model, in order, for all
+  740 OpenITI sources on the Archive (the 1.3.0 parser lost words in 3):
+  - text after a line-initial page anchor (`PageV01P023 وتسديدهم…`, 47 words
+    in 0711IbnIbrahimCimadDinWasiti.Tadhkira) and after glued anchors
+    (`PageV01P298PageV01P300…`, 0625AbuMuhammadIbnRushd.HalYattasilBiCaql);
+  - `#NewRec#` and other header lines no longer leak into the body
+    (0720IbnCumarKurdi.Juz);
+  - folio anchors such as `PageV01P003b` are read as page anchors.
+- Canonical `%~%` lines are split locally like the `%` form; a pair with no
+  words on one side (OCR noise such as `قدهة 1 %~% 11` in
+  0671AbuCabdAllahQurtubi.Asna) stays one verse line, not a fake couplet.
+- A verse placeholder merged with neighbouring text by the bridge is still
+  substituted instead of printing `VRSDVERSE…`.
+
 ## 1.3.0
 
 1.2.7 was bumped on `main` but never tagged or published; its changes ship
