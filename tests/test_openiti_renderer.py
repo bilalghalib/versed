@@ -480,3 +480,75 @@ def test_page_split_chunks_do_not_rewrap_past_the_bottom_margin(tmp_path):
         assert box["y"] + box["height"] <= theme.page_h - theme.margin_bottom + 0.5
     pages = sorted({box["page"] for box in coords})
     assert pages == list(range(pages[0], pages[-1] + 1)), "a split left an empty page"
+
+
+# Mixed-direction lines. The text layer stores UAX #9 visual order of the
+# isolate-free text, so readers that re-run bidi on the glyph stream (PDFKit)
+# round-trip exactly. Poppler and MuPDF use their own reordering; the cases
+# they cannot satisfy are marked xfail with what they return (a Chrome-printed
+# PDF of the same text extracts the same way in both).
+MIXED_FIXTURES = {
+    "paren_footnote": "قَالَ ابْنُ سِينَا (2) فِي كِتَابِهِ",
+    "western_digits": "مَاتَ سَنَةَ 681 بِدِمَشْقَ",
+    "indic_digits": "مَاتَ سَنَةَ ٦٨١ بِدِمَشْقَ",
+    "hijri_year": "تُوُفِّيَ سَنَةَ 902هـ بِالْقَاهِرَةِ",
+    "latin_title": "وَقَرَأَ كِتَابَ The Canon of Medicine عَلَى شَيْخِهِ",
+    "comma_after_digit": "فِي الْجُزْءِ 3، الصَّفْحَةِ ١٢، وَغَيْرِهَا",
+}
+
+_POPPLER_EXACT = {"hijri_year"}
+# Poppler's RTL dump moves the space beside a number to its other side.
+_POPPLER_SPACING_ONLY = {"western_digits", "indic_digits"}
+
+
+def _mixed_text(extractor, fixture, tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    doc = ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, MIXED_FIXTURES[fixture])])
+    path, _ = _render(doc, tmp_path)
+    return {
+        "mupdf": lambda: _mupdf_text(path),
+        "poppler": lambda: _poppler_text(path),
+        "pdfkit": lambda: _pdfkit_text(path, tmp_path),
+    }[extractor]()
+
+
+@pytest.mark.parametrize("fixture", sorted(MIXED_FIXTURES))
+def test_pdfkit_round_trips_digits_brackets_and_latin_in_arabic(tmp_path, fixture):
+    text = _mixed_text("pdfkit", fixture, tmp_path)
+    assert _norm_ws(MIXED_FIXTURES[fixture]) in _norm_ws(text)
+
+
+@pytest.mark.parametrize("fixture", sorted(MIXED_FIXTURES))
+def test_poppler_mixed_direction_lines(tmp_path, fixture, request):
+    text = _mixed_text("poppler", fixture, tmp_path)
+    source = MIXED_FIXTURES[fixture]
+    if fixture in _POPPLER_EXACT:
+        assert _norm_ws(source) in _norm_ws(text)
+    elif fixture in _POPPLER_SPACING_ONLY:
+        squeeze = lambda value: "".join(_norm_ws(value).split())
+        assert squeeze(source) in squeeze(text)
+    else:
+        request.node.add_marker(pytest.mark.xfail(reason="Poppler reorders brackets/marks next to LTR runs"))
+        assert _norm_ws(source) in _norm_ws(text)
+
+
+def test_render_fails_loudly_when_the_body_font_is_substituted(tmp_path, monkeypatch):
+    # This Mac rendered "Amiri" with AlNile / DecoType Naskh for months because
+    # fontconfig had no Amiri; the renderer must refuse instead.
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed import openiti_renderer
+
+    theme = openiti_renderer.BookTheme(name="missing", font_body="Versed No Such Face")
+    monkeypatch.setitem(openiti_renderer.THEMES, "missing_face", theme)
+    doc = ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, "بسم الله الرحمن الرحيم")])
+    with pytest.raises(RuntimeError, match="Versed No Such Face"):
+        _render(doc, tmp_path, theme_name="missing_face")
+
+
+def test_bundled_themes_resolve_their_requested_faces():
+    from versed.openiti_renderer import THEMES, _resolved_font_family
+
+    for theme in THEMES.values():
+        for family in {theme.font_body, theme.font_heading}:
+            assert _resolved_font_family(family).lower() == family.lower()
