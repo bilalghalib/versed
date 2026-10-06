@@ -14,6 +14,8 @@
   for Arabic only. A Chrome-printed PDF of the same text extracts the same
   way in Poppler and MuPDF, so these are reader limits (documented as xfail
   tests).
+- **Verse numbers sit in the margin opposite the page markers.** They shared
+  the outer margin and overprinted `[ص …]` (0466IbnSinanKhafaji.Diwan).
 - **No silent font substitution.** `render_book` raises when Pango would draw
   the theme's body or heading face with another font, or fall back per glyph
   for Arabic. On the build Mac, "Amiri" had been resolving to AlNile and
@@ -32,6 +34,8 @@
 - Canonical `%~%` lines are split locally like the `%` form; a pair with no
   words on one side (OCR noise such as `قدهة 1 %~% 11` in
   0671AbuCabdAllahQurtubi.Asna) stays one verse line, not a fake couplet.
+- An inline title (` $ `) inside a `%` verse line is a title, not a verse
+  line (0833IbnJazari.DurraMudiyya printed "$ & باب البسملة").
 - A verse placeholder merged with neighbouring text by the bridge is still
   substituted instead of printing `VRSDVERSE…`.
 

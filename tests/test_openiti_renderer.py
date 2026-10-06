@@ -552,3 +552,48 @@ def test_bundled_themes_resolve_their_requested_faces():
     for theme in THEMES.values():
         for family in {theme.font_body, theme.font_heading}:
             assert _resolved_font_family(family).lower() == family.lower()
+
+
+def test_verse_numbers_and_page_markers_use_opposite_margins(tmp_path, monkeypatch):
+    # 0466IbnSinanKhafaji.Diwan: "(١٢)" was drawn over "[ص ١٦٧]".
+    from versed import openiti_renderer
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    captured = {}
+    original = openiti_renderer._attach_semantic_text_layer
+
+    def capture(out_path, page_text):
+        captured.update(page_text)
+        return original(out_path, page_text)
+
+    monkeypatch.setattr(openiti_renderer, "_attach_semantic_text_layer", capture)
+    blocks = []
+    for number in range(1, 80):
+        blocks.append(Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": number}))
+        blocks.append(Block(
+            BlockType.VERSE_PAIR, "", hemistich_a="قفا نبك من ذكرى حبيب ومنزل",
+            hemistich_b="بسقط اللوى بين الدخول فحومل", meta={"verse_number": str(number)},
+        ))
+    _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    def boxes(lines, test):
+        found = []
+        for runs, x, baseline, width, height in lines:
+            text = "".join(char for _, run in runs for char, _ in run)
+            if test(text):
+                found.append((x, baseline - height, x + width, baseline))
+        return found
+
+    checked = 0
+    for lines in captured.values():
+        refs = boxes(lines, lambda text: "ص" in text)
+        numbers = boxes(lines, lambda text: "(" in text and "ص" not in text)
+        for ref in refs:
+            for number in numbers:
+                checked += 1
+                overlap = (
+                    min(ref[2], number[2]) > max(ref[0], number[0])
+                    and min(ref[3], number[3]) > max(ref[1], number[1])
+                )
+                assert not overlap, (ref, number)
+    assert checked

@@ -1207,14 +1207,16 @@ def render_book(
         y += 10
 
     def draw_verse_number(number: Optional[str], row_y: float) -> None:
-        """Print a source verse number in the outer margin, outside the word stream."""
+        """Print a source verse number in the margin opposite the page markers, outside the word stream."""
         if not number:
             return
         cr.set_source_rgb(*theme.color_page_ref)
         number_layout = make_layout(font_size=theme.size_page_ref, width=30)
         number_layout.set_alignment(Pango.Alignment.CENTER)
         number_layout.set_text(f"({str(number).strip('()').translate(W2E)})", -1)
-        x = W - mr() + 4 if page_num % 2 == 0 else ml() - 34
+        # Page markers take the outer margin (right on even pages, left on
+        # odd); verse numbers take the other one so the two never collide.
+        x = ml() - 34 if page_num % 2 == 0 else W - mr() + 4
         cr.move_to(x, row_y + 2)
         paint_layout(number_layout)
 

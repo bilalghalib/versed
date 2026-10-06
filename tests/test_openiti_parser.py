@@ -404,3 +404,16 @@ def test_folio_page_markers_after_a_verse_keep_the_verse():
 
     assert _printed_words(doc) == "وصوط الله عن بينادي توبوا والا تهلكون بعده نص".split()
     assert "b" not in _printed_words(doc)
+
+
+def test_inline_title_inside_a_percent_verse_line_is_a_title():
+    # 0833IbnJazari.DurraMudiyya: "... أسجلا % $ & باب ~~البسملة وأم القرآن"
+    doc = _parse_body(
+        "# % وإن كلمة أطلقت فالشهرة اعتمد % % كذلك تعريفا وتنكيرا أسجلا % $ & باب\n"
+        "~~البسملة وأم القرآن\n"
+    )
+
+    assert [(block.type, block.text or block.hemistich_a) for block in doc.blocks] == [
+        (BlockType.VERSE_PAIR, "وإن كلمة أطلقت فالشهرة اعتمد"),
+        (BlockType.TITLE, "& باب البسملة وأم القرآن"),
+    ]
