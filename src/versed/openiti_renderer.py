@@ -886,6 +886,11 @@ def render_book(
         # mixed editorial apparatus look jagged. Keep body blocks flush-right
         # and leave true justification to a later shaping pass.
         layout.set_justify(False)
+        if _words is not None:
+            # A page-split chunk is already broken into the parent's lines.
+            # Re-wrapping them can add lines (Pango re-breaks some lines laid
+            # out alone, e.g. around " ، "), pushing text past the bottom.
+            layout.set_wrap(Pango.WrapMode.NONE)
         layout.set_text(text, -1)
         if use_kashida and theme.kashida and not centered and _words is None:
             text = _per_line_kashida(
@@ -938,6 +943,7 @@ def render_book(
                             Pango.Alignment.CENTER if centered else Pango.Alignment.LEFT
                         )
                         candidate_layout.set_justify(False)
+                        candidate_layout.set_wrap(Pango.WrapMode.NONE)
                         candidate_layout.set_line_spacing(theme.line_height)
                         candidate_layout.set_text(candidate, -1)
                         _, candidate_ext = candidate_layout.get_pixel_extents()

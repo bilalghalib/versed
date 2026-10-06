@@ -25,7 +25,10 @@ here. Everything below is relative to the published 1.2.6.
   on the next page at a word boundary, and notes still pending at the end
   get notes-only pages. `BookTheme.footnote_max_chars` is no longer used.
 - **Paragraphs taller than a page** flow across pages instead of being drawn
-  past the bottom margin (regression test added; 1.2.6 overflowed).
+  past the bottom margin (regression test added; 1.2.6 overflowed). Page-split
+  chunks are no longer re-wrapped: Pango re-breaks some lines laid out alone
+  (e.g. around ` ، `), which on `main` still pushed a 28-line chunk to 39 lines
+  and off the page (0983IbnMuhammadSahgirAkhdari.MukhtasarFiCibadat).
 - Balanced pagination without widows/orphans; mixed-direction Arabic layout
   keeps bracketed references like `(2)` inside their LTR isolate.
 - Text-layer fonts fall back across Arial Unicode, SF Arabic, Geeza Pro,

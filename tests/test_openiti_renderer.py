@@ -453,3 +453,30 @@ def test_paragraph_taller_than_a_page_stays_inside_the_body_area(tmp_path):
         for box in coords:
             assert box["page"] - 1 < pdf.page_count
             assert box["y"] + box["height"] <= theme.page_h - theme.margin_bottom + 0.5
+
+
+def test_page_split_chunks_do_not_rewrap_past_the_bottom_margin(tmp_path):
+    # 0983IbnMuhammadSahgirAkhdari.MukhtasarFiCibadat: lines with " ، " re-wrap
+    # when a page chunk is laid out again, so a 28-line chunk drew 39 lines
+    # and ran off the page (main and 1.2.6 alike).
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed.openiti_renderer import THEMES
+
+    theme = THEMES["scholarly"]
+    import random
+
+    vocabulary = (
+        "ساهيا أو عامدا ، ولا يضحك في صلاته إلا غافل متلاعب والمؤمن إذا قام "
+        "للصلاة أعرض بقلبه وعظمته ويرتعد قلبه وترهب نفسه من هيبة الله جل جلاله "
+        "فهذه قليلا ثم تيقن الطهارة فلا شيء عليه ومن التفت"
+    ).split()
+    rng = random.Random(2)  # a seed that overflowed before the fix
+    words = [rng.choice(vocabulary) for _ in range(1200)]
+    _, result = _render(ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, " ".join(words))]), tmp_path)
+
+    coords = result["word_coordinates"]
+    assert [box["text"] for box in coords] == words
+    for box in coords:
+        assert box["y"] + box["height"] <= theme.page_h - theme.margin_bottom + 0.5
+    pages = sorted({box["page"] for box in coords})
+    assert pages == list(range(pages[0], pages[-1] + 1)), "a split left an empty page"
