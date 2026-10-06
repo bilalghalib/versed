@@ -41,6 +41,16 @@ here. Everything below is relative to the published 1.2.6.
   becomes `Block.meta["verse_number"]` (printed in the margin) instead of the
   second hemistich. Previously the upstream parser turned the first
   hemistich into a paragraph and the verse number into hemistich B.
+- Conformance with the OpenITI mARkdown scheme
+  (https://github.com/OpenITI/mARkdown_scheme): inline tags are removed and
+  their words kept (`@QURS…_BEG/_END`, `@TOP02`-style and manual `@T/@S/@B/@P/@SRC`
+  entity tags, `@YB45` year tags, text-reuse and passage ids, `REF##########`,
+  open-tagging `@TOP@TOP@…@`); ignore elements (`~!~…~!!~`, `NoteV…N…`,
+  `PageWrongV…`, `PageStartV…`, `PageBegV…`, `PageEndV…`, `StartingPageV…`)
+  and `#COMMENT#` / `#ENTITIES#` / `#@COMMENT` lines are dropped;
+  `### |EDITOR|` / `### |SKIP|` become one `EDITORIAL_SECTION` block (was a
+  heading printing "EDITOR|" plus a duplicate note); `#~:cat:` lines become
+  `MORPHO_TAG`; the `$BIO_REP$` tag no longer prints.
 - Arabic guillemets `«…»` are prose quotations; only `﴿…﴾` marks a Qur'an
   citation.
 

@@ -183,13 +183,56 @@ def _normalize_input_for_openiti_parser(text: str) -> str:
             normalized_lines.append(raw_line)
             continue
 
-        if stripped.startswith(("######OpenITI", "#META#", "### ", "# ", "~~", "PageV", "ms", "Milestone")):
+        if stripped.startswith(("######OpenITI", "#META#", "### ", "# ", "#~:", "~~", "PageV", "ms", "Milestone")):
             normalized_lines.append(raw_line)
             continue
 
         normalized_lines.append(f"# {stripped}")
 
     return "\n".join(normalized_lines)
+
+
+# Patterns from the OpenITI mARkdown scheme (EditPad Pro 8 syntax file,
+# https://github.com/OpenITI/mARkdown_scheme). Tags are removed and the words
+# they mark are kept; "ignore elements" are removed with their content.
+_SCHEME_IGNORED = re.compile(
+    r"~!~[^~]+~!!~"
+    r"|\bNoteV\d+P\d+N\d+\b"
+    r"|\bPage(?:Wrong|Start|Beg|End)V\d+P\d+\b"
+    r"|\bStartingPageV\d+P\d+\b"
+)
+_SCHEME_TAGS = re.compile(
+    # Open tagging pattern, e.g. @TOP@TOP@baghdad_1@-@true@
+    r"@[A-Z]{3}@[A-Z]{2,}@[A-Za-z_0-9,]+@(?:-?@?(?:true|0+|review|tr|fr)@?)?"
+    # Qur'an citation and text-reuse boundaries
+    r"|@QURS\d+A\d+_(?:BEG|END)\b"
+    r"|@[A-Z]{4}V\d+P\d+[A-Z]_(?:BEG|END)(?:_[A-Z]+)*\b"
+    r"|\b(?:[A-Z]{3}_)?[A-Z]{4}V\d+P\d+[A-Z]\b"
+    # Named entities (auto-tagged and manual), year tags, REF magic values
+    r"|@(?:TOP|SOC|PER|BOK|SOURCE|SRC|[TSBP])\d+\b"
+    r"|@Y[ABD]\d+\b"
+    r"|\bREF\d{10}\b"
+)
+_SCHEME_DROPPED_LINE = re.compile(r"^(?:#COMMENT#|#ENTITIES#|#@COMMENT)")
+_EDITORIAL_HEADER = re.compile(r"^\|?\s*(EDITOR|SKIP)\|\s*(.*)$")
+
+
+def _strip_scheme_markup(text: str) -> str:
+    """Remove scheme tags and ignorable elements from the body, keep the words."""
+    lines: List[str] = []
+    in_body = META_END not in text
+    for line in text.splitlines():
+        if not in_body:
+            lines.append(line)
+            in_body = META_END in line
+            continue
+        if _SCHEME_DROPPED_LINE.match(line.strip()):
+            continue
+        cleaned = _SCHEME_TAGS.sub("", _SCHEME_IGNORED.sub("", line))
+        if cleaned != line:
+            cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).rstrip()
+        lines.append(cleaned)
+    return "\n".join(lines)
 
 
 _VERSE_PLACEHOLDER = re.compile(r"^VRSDVERSE(\d+)$")
@@ -537,7 +580,7 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
     if META_END in text:
         header_text, _ = text.split(META_END, 1)
 
-    bridge_text, percent_verses = _extract_percent_verses(text)
+    bridge_text, percent_verses = _extract_percent_verses(_strip_scheme_markup(text))
     payload = _run_external_openiti_parser(_normalize_input_for_openiti_parser(bridge_text))
     header_meta = _extract_metadata(header_text)
     doc = ParsedDocument(title=title, author=author, meta=header_meta)
@@ -561,6 +604,7 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
     }
 
     _EXTRA_CONTEXT_MAP = _OPENITI_EXTRA_CONTEXT
+    skip_editorial_echo: Optional[str] = None
 
     for section in payload.get("content", []) or []:
         if not isinstance(section, dict):
@@ -589,9 +633,22 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 content_parts = [str(content).strip()] if str(content).strip() else []
 
             content_str = " ".join(content_parts)
+            if skip_editorial_echo is not None:
+                echo, skip_editorial_echo = skip_editorial_echo, None
+                if extra == "editorial" and content_str == echo:
+                    continue
 
             if btype == "title":
                 doc.blocks.append(Block(BlockType.TITLE, content_str))
+
+            elif btype == "header" and _EDITORIAL_HEADER.match(content_str):
+                # "### |EDITOR|" / "### |SKIP|" open an editorial section.
+                # The upstream parser also repeats its title as an editorial
+                # paragraph; keep a single block.
+                editorial_title = _EDITORIAL_HEADER.match(content_str).group(2).strip()
+                doc.blocks.append(Block(BlockType.EDITORIAL_SECTION, editorial_title))
+                skip_editorial_echo = editorial_title
+                continue
 
             elif btype == "header":
                 level = int(ext_block.get("level") or 1)
@@ -620,7 +677,8 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 doc.blocks.extend(_layout_blocks_from_content(content_str, ext_block))
 
             elif extra and extra in _EXTRA_CONTEXT_MAP:
-                cleaned = _strip_visible_markup(content_str)
+                # The upstream parser leaves the tag of "### $BIO_REP$" lines.
+                cleaned = _strip_visible_markup(re.sub(r"^[A-Z]{3}_[A-Z]{3}\$\s*", "", content_str))
                 if cleaned:
                     doc.blocks.append(Block(_EXTRA_CONTEXT_MAP[extra], cleaned))
 

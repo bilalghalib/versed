@@ -20,6 +20,11 @@ not directly from raw source lines.
 
 ## Marker Policy
 
+The reference is the OpenITI mARkdown scheme
+(https://github.com/OpenITI/mARkdown_scheme; prose at
+https://maximromanov.github.io/mARkdown/). `tests/test_openiti_parser.py`
+cites the scheme category for each conformance case.
+
 - `PageV..P..` is structural, not visible prose.
 - `ms####` and `Milestone####` are source milestones, not visible prose.
 - ` + ` is a source separator. It is hidden by default.
