@@ -183,13 +183,148 @@ def _normalize_input_for_openiti_parser(text: str) -> str:
             normalized_lines.append(raw_line)
             continue
 
-        if stripped.startswith(("######OpenITI", "#META#", "### ", "# ", "~~", "PageV", "ms", "Milestone")):
+        if stripped.startswith(("######OpenITI", "#META#", "### ", "# ", "#~:", "~~", "PageV", "ms", "Milestone")):
             normalized_lines.append(raw_line)
             continue
 
         normalized_lines.append(f"# {stripped}")
 
     return "\n".join(normalized_lines)
+
+
+# Patterns from the OpenITI mARkdown scheme (EditPad Pro 8 syntax file,
+# https://github.com/OpenITI/mARkdown_scheme). Tags are removed and the words
+# they mark are kept; "ignore elements" are removed with their content.
+_SCHEME_IGNORED = re.compile(
+    r"~!~[^~]+~!!~"
+    r"|\bNoteV\d+P\d+N\d+\b"
+    r"|\bPage(?:Wrong|Start|Beg|End)V\d+P\d+\b"
+    r"|\bStartingPageV\d+P\d+\b"
+)
+_SCHEME_TAGS = re.compile(
+    # Open tagging pattern, e.g. @TOP@TOP@baghdad_1@-@true@
+    r"@[A-Z]{3}@[A-Z]{2,}@[A-Za-z_0-9,]+@(?:-?@?(?:true|0+|review|tr|fr)@?)?"
+    # Qur'an citation and text-reuse boundaries
+    r"|@QURS\d+A\d+_(?:BEG|END)\b"
+    r"|@[A-Z]{4}V\d+P\d+[A-Z]_(?:BEG|END)(?:_[A-Z]+)*\b"
+    r"|\b(?:[A-Z]{3}_)?[A-Z]{4}V\d+P\d+[A-Z]\b"
+    # Named entities (auto-tagged and manual), year tags, REF magic values
+    r"|@(?:TOP|SOC|PER|BOK|SOURCE|SRC|[TSBP])\d+\b"
+    r"|@Y[ABD]\d+\b"
+    r"|\bREF\d{10}\b"
+)
+_SCHEME_DROPPED_LINE = re.compile(r"^(?:#COMMENT#|#ENTITIES#|#@COMMENT)")
+_EDITORIAL_HEADER = re.compile(r"^\|?\s*(EDITOR|SKIP)\|\s*(.*)$")
+
+
+def _strip_scheme_markup(text: str) -> str:
+    """Remove scheme tags and ignorable elements from the body, keep the words."""
+    lines: List[str] = []
+    in_body = META_END not in text
+    for line in text.splitlines():
+        if not in_body:
+            lines.append(line)
+            in_body = META_END in line
+            continue
+        if _SCHEME_DROPPED_LINE.match(line.strip()):
+            continue
+        cleaned = _SCHEME_TAGS.sub("", _SCHEME_IGNORED.sub("", line))
+        if cleaned != line:
+            cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).rstrip()
+        lines.append(cleaned)
+    return "\n".join(lines)
+
+
+_VERSE_PLACEHOLDER = re.compile(r"^VRSDVERSE(\d+)$")
+_VERSE_NUMBER = re.compile(r"^\(?[0-9٠-٩]+\)?$")
+_PERCENT_VERSE_LINE = re.compile(r"^#?\s*%")
+
+
+def _percent_verse_blocks(body: str) -> List[Block]:
+    """Parse one ``%``-delimited verse line (with its ``~~`` continuations).
+
+    Shamela-derived OpenITI poetry writes ``% A % B % % 3``: hemistichs
+    between ``%`` marks, sometimes a doubled ``%``, and a trailing verse
+    number. The upstream parser reads the number as the second hemistich and
+    turns the real first hemistich into a paragraph, so these lines are split
+    here instead. A purely numeric segment closes the verse(s) before it and
+    is kept as ``meta["verse_number"]``; every other segment is a hemistich,
+    paired in source order, with an odd one left as a verse line.
+    """
+    segments = [
+        _strip_inline_markers(part).strip()
+        for part in body.split("%")
+    ]
+    segments = [part for part in segments if part and part not in {"~", "|"}]
+
+    blocks: List[Block] = []
+    pending: List[str] = []
+
+    def flush() -> None:
+        for index in range(0, len(pending) - 1, 2):
+            blocks.append(Block(
+                BlockType.VERSE_PAIR, "",
+                hemistich_a=pending[index], hemistich_b=pending[index + 1],
+            ))
+        if len(pending) % 2:
+            blocks.append(Block(BlockType.VERSE_LINE, pending[-1]))
+        pending.clear()
+
+    for segment in segments:
+        if _VERSE_NUMBER.match(segment):
+            had_pending = bool(pending)
+            flush()
+            if had_pending and "verse_number" not in blocks[-1].meta:
+                blocks[-1].meta["verse_number"] = segment
+            else:
+                # A number with no verse of its own is still source text.
+                blocks.append(Block(BlockType.PARAGRAPH, segment))
+            continue
+        if segment.endswith(" |"):
+            segment = segment[:-2].rstrip()
+        pending.append(segment)
+    flush()
+    return blocks
+
+
+def _extract_percent_verses(text: str) -> Tuple[str, List[List[Block]]]:
+    """Replace ``%``-delimited verse lines with placeholders for the bridge.
+
+    Page markers on the line stay on the placeholder line so the upstream
+    parser still assigns the verse to the right printed page.
+    """
+    out: List[str] = []
+    verses: List[List[Block]] = []
+    lines = text.splitlines()
+    index = 0
+    in_body = META_END not in text
+    while index < len(lines):
+        raw_line = lines[index]
+        index += 1
+        stripped = raw_line.strip()
+        if not in_body:
+            out.append(raw_line)
+            in_body = META_END in raw_line
+            continue
+        if stripped.startswith("#") and stripped[1:2] not in ("", " ", "%"):
+            out.append(raw_line)
+            continue
+        if not _PERCENT_VERSE_LINE.match(stripped):
+            out.append(raw_line)
+            continue
+        logical = stripped.lstrip("#").strip()
+        while index < len(lines) and lines[index].lstrip().startswith("~~"):
+            logical += " " + lines[index].lstrip()[2:].strip()
+            index += 1
+        pages = PAGE_TAG.findall(logical)
+        blocks = _percent_verse_blocks(PAGE_TAG.sub(" ", logical))
+        if not blocks:
+            out.append(raw_line)
+            continue
+        tags = " ".join(f"PageV{vol}P{page}" for vol, page in pages)
+        out.append(f"# VRSDVERSE{len(verses)} {tags}".rstrip())
+        verses.append(blocks)
+    return "\n".join(out), verses
 
 
 def _run_external_openiti_parser(text: str) -> Dict[str, Any]:
@@ -445,7 +580,8 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
     if META_END in text:
         header_text, _ = text.split(META_END, 1)
 
-    payload = _run_external_openiti_parser(_normalize_input_for_openiti_parser(text))
+    bridge_text, percent_verses = _extract_percent_verses(_strip_scheme_markup(text))
+    payload = _run_external_openiti_parser(_normalize_input_for_openiti_parser(bridge_text))
     header_meta = _extract_metadata(header_text)
     doc = ParsedDocument(title=title, author=author, meta=header_meta)
 
@@ -468,6 +604,7 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
     }
 
     _EXTRA_CONTEXT_MAP = _OPENITI_EXTRA_CONTEXT
+    skip_editorial_echo: Optional[str] = None
 
     for section in payload.get("content", []) or []:
         if not isinstance(section, dict):
@@ -496,9 +633,22 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 content_parts = [str(content).strip()] if str(content).strip() else []
 
             content_str = " ".join(content_parts)
+            if skip_editorial_echo is not None:
+                echo, skip_editorial_echo = skip_editorial_echo, None
+                if extra == "editorial" and content_str == echo:
+                    continue
 
             if btype == "title":
                 doc.blocks.append(Block(BlockType.TITLE, content_str))
+
+            elif btype == "header" and _EDITORIAL_HEADER.match(content_str):
+                # "### |EDITOR|" / "### |SKIP|" open an editorial section.
+                # The upstream parser also repeats its title as an editorial
+                # paragraph; keep a single block.
+                editorial_title = _EDITORIAL_HEADER.match(content_str).group(2).strip()
+                doc.blocks.append(Block(BlockType.EDITORIAL_SECTION, editorial_title))
+                skip_editorial_echo = editorial_title
+                continue
 
             elif btype == "header":
                 level = int(ext_block.get("level") or 1)
@@ -527,7 +677,8 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 doc.blocks.extend(_layout_blocks_from_content(content_str, ext_block))
 
             elif extra and extra in _EXTRA_CONTEXT_MAP:
-                cleaned = _strip_visible_markup(content_str)
+                # The upstream parser leaves the tag of "### $BIO_REP$" lines.
+                cleaned = _strip_visible_markup(re.sub(r"^[A-Z]{3}_[A-Z]{3}\$\s*", "", content_str))
                 if cleaned:
                     doc.blocks.append(Block(_EXTRA_CONTEXT_MAP[extra], cleaned))
 
@@ -535,6 +686,10 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 # Default: paragraph — apply inline classification
                 # Skip stray markup artifacts (lone #, empty content)
                 cleaned = _strip_inline_markers(content_str)
+                placeholder = _VERSE_PLACEHOLDER.match(cleaned)
+                if placeholder and int(placeholder.group(1)) < len(percent_verses):
+                    doc.blocks.extend(percent_verses[int(placeholder.group(1))])
+                    continue
                 if not cleaned or cleaned in ("#", "##", "###"):
                     continue
                 doc.blocks.extend(_layout_blocks_from_content(content_str, ext_block))

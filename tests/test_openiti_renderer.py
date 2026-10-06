@@ -16,14 +16,6 @@ def test_ltr_reference_keeps_its_opening_parenthesis_in_the_isolate():
     assert text == f"ربيعة {LRI}(2){PDI} بن حارثة"
 
 
-def test_pdfkit_proxy_reverses_rtl_by_grapheme_without_gtk():
-    from versed.openiti_renderer import _pdfkit_proxy_text
-
-    assert _pdfkit_proxy_text("ربيعة \u2066(2)\u2069 بن حارثة\u0640") == "ةثراح نب )2( ةعيبر"
-    assert _pdfkit_proxy_text("عَلِيّ") == "يّلِعَ"
-    assert _pdfkit_proxy_text("Ibn Khallikan") == "Ibn Khallikan"
-
-
 def test_macos_renderer_selects_searchable_fontconfig_backend():
     from versed.openiti_renderer import _configure_pango_backend
 
@@ -227,3 +219,264 @@ def test_attached_apparatus_reserves_space_on_its_page():
         assert body_bottom < 754
     finally:
         os.unlink(out_path)
+
+
+# ---------------------------------------------------------------------------
+# Archive-gate invariants (C3/T3): text layer, word stream, apparatus, bounds.
+# ---------------------------------------------------------------------------
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import unicodedata
+
+# Diacritics (including line-final vowels), shadda, dagger alif, maddah
+# above, hamza seats, alif wasla, lam-alef, brackets, guillemets and Arabic
+# question mark; long enough to wrap over several lines.
+ARABIC_FIXTURE = (
+    "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ قَالَ ابْنُ سِينَا فِي الْمَسْأَلَةِ الْمُؤَخَّرَةِ "
+    "لَا إِلَٰهَ إِلَّا اللَّهُ وَقَالَ ( عِبَارَةٌ ) «ثُمَّ» مَضَى؟ وَالسُّؤَالِ الْأَوَّلِ "
+    "سُوٓءٍ أَإِنَّكَ ٱلْكِتَٰبُ وَتَأَخَّرَ الْقَوْلُ فِي ذٰلِكَ إِلَى آخِرِ الْبَابِ "
+    "وَذَكَرَ أَهْلُ الْعِلْمِ أَنَّ هَٰذِهِ الْمَسْأَلَةَ مِنْ أُمَّهَاتِ الْمَسَائِلِ."
+)
+# Poppler moves the space before an Arabic comma or colon to after it (its
+# bidi pass does not treat them as right-to-left), so this one is compared
+# without whitespace.
+ARABIC_PUNCTUATION_FIXTURE = "قَالَ الشَّيْخُ: لَا إِلَٰهَ إِلَّا اللَّهُ، وَحْدَهُ؛ أَلَيْسَ كَذَٰلِكَ؟ بَلَىٰ."
+
+_BIDI_CONTROLS = dict.fromkeys(map(ord, "‎‏‪‫‬‭‮⁦⁧⁨⁩"))
+
+_PDFKIT_SWIFT = r"""
+import Foundation
+import PDFKit
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+guard let doc = PDFDocument(url: url) else { exit(2) }
+var out = ""
+for i in 0..<doc.pageCount { out += (doc.page(at: i)?.string ?? "") + "\n" }
+FileHandle.standardOutput.write(out.data(using: .utf8)!)
+"""
+
+
+def _norm_ws(text):
+    return " ".join(text.translate(_BIDI_CONTROLS).split())
+
+
+def _render(doc, tmp_path, name="book.pdf", **kwargs):
+    from versed.openiti_renderer import render_book
+
+    out_path = str(tmp_path / name)
+    return out_path, render_book(doc, out_path, **kwargs)
+
+
+def _mupdf_text(path):
+    fitz = pytest.importorskip("fitz")
+    with fitz.open(path) as pdf:
+        return "\n".join(page.get_text() for page in pdf)
+
+
+def _poppler_text(path):
+    if not shutil.which("pdftotext"):
+        pytest.skip("poppler pdftotext is not installed")
+    return subprocess.run(
+        ["pdftotext", "-enc", "UTF-8", path, "-"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+
+
+def _pdfkit_text(path, tmp_path):
+    if sys.platform != "darwin" or not shutil.which("swift"):
+        pytest.skip("macOS PDFKit is not available")
+    script = tmp_path / "pdfkit_text.swift"
+    script.write_text(_PDFKIT_SWIFT)
+    return subprocess.run(
+        ["swift", str(script), path],
+        check=True, capture_output=True, text=True, timeout=300,
+    ).stdout
+
+
+@pytest.mark.parametrize("extractor", ["mupdf", "poppler", "pdfkit"])
+def test_text_layer_round_trips_arabic_on_vector_pages(tmp_path, extractor):
+    fitz = pytest.importorskip("fitz")
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    doc = ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, ARABIC_FIXTURE)])
+    path, _ = _render(doc, tmp_path)
+
+    with fitz.open(path) as pdf:
+        for page in pdf:
+            # The body stays the Cairo vector page: no page-sized raster.
+            assert page.get_images() == []
+            assert page.get_drawings() or page.get_text("rawdict")["blocks"]
+
+    text = {
+        "mupdf": lambda: _mupdf_text(path),
+        "poppler": lambda: _poppler_text(path),
+        "pdfkit": lambda: _pdfkit_text(path, tmp_path),
+    }[extractor]()
+    assert _norm_ws(ARABIC_FIXTURE) in _norm_ws(text)
+
+
+@pytest.mark.parametrize("extractor", ["mupdf", "poppler", "pdfkit"])
+def test_text_layer_keeps_arabic_punctuation_in_place(tmp_path, extractor):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    doc = ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, ARABIC_PUNCTUATION_FIXTURE)])
+    path, _ = _render(doc, tmp_path)
+    text = {
+        "mupdf": lambda: _mupdf_text(path),
+        "poppler": lambda: _poppler_text(path),
+        "pdfkit": lambda: _pdfkit_text(path, tmp_path),
+    }[extractor]()
+    squeeze = lambda value: "".join(_norm_ws(value).split())
+    assert squeeze(ARABIC_PUNCTUATION_FIXTURE) in squeeze(text)
+
+
+def test_mupdf_search_finds_logical_arabic_phrase(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    doc = ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, ARABIC_FIXTURE)])
+    path, _ = _render(doc, tmp_path)
+    with fitz.open(path) as pdf:
+        assert pdf[0].search_for("الْمَسْأَلَةِ الْمُؤَخَّرَةِ")
+
+
+def _assert_words_are_source_tokens(coords, blocks):
+    """Every drawn box names a source token, in source order."""
+    tokens = [
+        token
+        for block in blocks
+        for field in ("text", "hemistich_a", "hemistich_b", "isnad_text", "matn_text", "hukm_text")
+        for token in (getattr(block, field, "") or "").split()
+    ]
+    cursor = 0
+    for box in coords:
+        while cursor < len(tokens) and tokens[cursor] != box["text"]:
+            cursor += 1
+        assert cursor < len(tokens), f"drawn word not in source: {box['text']!r}"
+        cursor += 1
+
+
+def test_word_stream_holds_only_source_words(tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    blocks = [
+        Block(BlockType.BIO_MAN, "12 - إبراهيم النخعي"),
+        Block(BlockType.PARAGRAPH, "كان فقيها من أهل الكوفة"),
+        Block(BlockType.EDITORIAL_SECTION, "مقدمة المحقق"),
+        Block(BlockType.ADMIN_DIVISION, "الشام", meta={"admin_type": "REG1"}),
+        Block(BlockType.ROUTE, "ثلاثة أيام", meta={"route_type": "DIST"}),
+        Block(BlockType.MORPHO_TAG, "", meta={"category": "fiqh"}),
+        Block(BlockType.LACUNA, ""),
+        Block(BlockType.DIC_NISBA, "3 - الكوفي نسبة إلى الكوفة"),
+    ]
+    doc = ParsedDocument(title="عنوان", author="مؤلف", blocks=blocks)
+    _, result = _render(doc, tmp_path)
+
+    coords = result["word_coordinates"]
+    _assert_words_are_source_tokens(coords, blocks)
+    texts = [box["text"] for box in coords]
+    assert "◆" not in texts and "▸" not in texts
+    assert "12" in texts and "إبراهيم" in texts and "3" in texts
+
+
+def test_page_split_never_cuts_a_source_token_into_two_words(tmp_path):
+    # 1370AhmadSamihKhalidi.MacahidMisriyya: Pango may wrap "(681هـ/1282م)،"
+    # at the slash; joining split lines with "\n" turned it into two words.
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    tokens = []
+    for index in range(600):
+        tokens += ["الملك"] * (index % 5) + [f"(6{index % 90:02d}ه/12{index % 97:02d}م)،"]
+    blocks = [Block(BlockType.PARAGRAPH, " ".join(tokens))]
+    _, result = _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    coords = result["word_coordinates"]
+    assert len({box["page"] for box in coords}) > 1
+    assert [box["text"] for box in coords] == tokens
+    assert [box["word_index"] for box in coords] == list(range(len(tokens)))
+
+
+def test_word_stream_and_text_layer_carry_no_synthetic_kashida(tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed.openiti_renderer import TATWEEL
+
+    # Literary theme justifies with kashida; source "هـ" keeps its tatweel.
+    text = " ".join(["قال الله تعالى في كتابه العزيز سنة 681هـ"] * 60)
+    blocks = [Block(BlockType.QURAN_CITATION, text)]
+    path, result = _render(ParsedDocument(blocks=blocks), tmp_path, theme_name="literary")
+
+    coords = result["word_coordinates"]
+    assert [box["text"] for box in coords] == text.split()
+    layer = _mupdf_text(path)
+    assert layer.count(TATWEEL) == text.count(TATWEEL)
+
+
+def test_huge_apparatus_note_loses_no_source_text(tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    letters = "بتثجحخدذرزسشصضطظعغفقكلمنهوي"
+    words = [a + b + c for a in letters[:12] for b in letters[:12] for c in letters[:12]][:1500]
+    note = "تنبيه: " + " ".join(words)
+    blocks = [
+        Block(BlockType.PARAGRAPH, " ".join(["متن"] * 200)),
+        Block(BlockType.APPARATUS_NOTE, note),
+        Block(BlockType.PARAGRAPH, "خاتمة الكتاب"),
+    ]
+    path, _ = _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    layer = _mupdf_text(path)
+    extracted = layer.split()
+    assert "..." not in layer and "…" not in layer
+    for word in words:
+        assert extracted.count(word) == 1, word
+
+
+def test_paragraph_taller_than_a_page_stays_inside_the_body_area(tmp_path):
+    # Released 1.2.6 drew a paragraph taller than one page past the bottom
+    # margin; it must flow onto following pages instead.
+    fitz = pytest.importorskip("fitz")
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed.openiti_renderer import THEMES
+
+    theme = THEMES["scholarly"]
+    words = [f"كلمة{chr(0x0628 + index % 20)}" for index in range(2500)]
+    blocks = [Block(BlockType.PARAGRAPH, " ".join(words))]
+    path, result = _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    coords = result["word_coordinates"]
+    assert len(coords) == len(words)
+    with fitz.open(path) as pdf:
+        assert pdf.page_count >= 3
+        for box in coords:
+            assert box["page"] - 1 < pdf.page_count
+            assert box["y"] + box["height"] <= theme.page_h - theme.margin_bottom + 0.5
+
+
+def test_page_split_chunks_do_not_rewrap_past_the_bottom_margin(tmp_path):
+    # 0983IbnMuhammadSahgirAkhdari.MukhtasarFiCibadat: lines with " ، " re-wrap
+    # when a page chunk is laid out again, so a 28-line chunk drew 39 lines
+    # and ran off the page (main and 1.2.6 alike).
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed.openiti_renderer import THEMES
+
+    theme = THEMES["scholarly"]
+    import random
+
+    vocabulary = (
+        "ساهيا أو عامدا ، ولا يضحك في صلاته إلا غافل متلاعب والمؤمن إذا قام "
+        "للصلاة أعرض بقلبه وعظمته ويرتعد قلبه وترهب نفسه من هيبة الله جل جلاله "
+        "فهذه قليلا ثم تيقن الطهارة فلا شيء عليه ومن التفت"
+    ).split()
+    rng = random.Random(2)  # a seed that overflowed before the fix
+    words = [rng.choice(vocabulary) for _ in range(1200)]
+    _, result = _render(ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, " ".join(words))]), tmp_path)
+
+    coords = result["word_coordinates"]
+    assert [box["text"] for box in coords] == words
+    for box in coords:
+        assert box["y"] + box["height"] <= theme.page_h - theme.margin_bottom + 0.5
+    pages = sorted({box["page"] for box in coords})
+    assert pages == list(range(pages[0], pages[-1] + 1)), "a split left an empty page"

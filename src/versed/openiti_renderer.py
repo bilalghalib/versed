@@ -15,7 +15,7 @@ import tempfile
 import unicodedata
 from io import BytesIO
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, Optional, Tuple
 
 from .openiti_parser import ARABIC_CHAR, BlockType, ParsedDocument
 
@@ -23,6 +23,7 @@ from .openiti_parser import ARABIC_CHAR, BlockType, ParsedDocument
 TATWEEL = "\u0640"
 LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
 PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
+RLM = "\u200f"  # RIGHT-TO-LEFT MARK
 # An optional OPENING bracket is part of the run. Without it, a footnote
 # reference like "(2)" matches only from the digit -- so the closing paren
 # lands inside the isolate while the opening one stays outside. That splits
@@ -98,54 +99,111 @@ def protect_ltr_runs(text: str) -> str:
     return _LTR_RUN.sub(lambda m: f"{LRI}{m.group(0)}{PDI}", text)
 
 
-def _semantic_pdf_text(text: str) -> str:
-    """Return source text suitable for the PDF reading layer.
+def _semantic_pdf_text(text: str, synthetic: Collection[int] = (), base: int = 0) -> str:
+    """Return source text suitable for the PDF reading layer and word stream.
 
-    The isolates make mixed Arabic and Latin runs shape correctly, while
-    kashida inserts tatweel only to fill a rendered line. Neither belongs in
-    copied text, where they otherwise change cursor order and word search.
+    The isolates make mixed Arabic and Latin runs shape correctly, and kashida
+    inserts tatweel only to fill a rendered line. Neither belongs in copied
+    text or word ids. ``synthetic`` holds the UTF-8 byte offsets (relative to
+    ``base``) of tatweel the justifier inserted, so tatweel that is part of
+    the source, such as the hijri abbreviation "هـ", survives.
     """
-    return text.replace(LRI, "").replace(PDI, "").replace(TATWEEL, "")
+    out: list[str] = []
+    offset = base
+    for char in text:
+        if char not in (LRI, PDI) and not (char == TATWEEL and offset in synthetic):
+            out.append(char)
+        offset += len(char.encode("utf-8"))
+    return "".join(out)
 
 
-def _pdfkit_proxy_text(text: str) -> str:
-    """Encode an RTL line so PDFKit copies it back in logical order.
+def _align_rendered_to_source(rendered: str, source: str) -> Tuple[list[int], frozenset[int]]:
+    """Map each source character to its byte offset in the rendered text.
 
-    PDFKit returns unshaped RTL text in reverse visual order. Reversing by
-    grapheme cluster before writing the invisible layer makes its clipboard
-    output match the source without detaching Arabic combining marks.
+    Rendering only ever inserts characters into the source: kashida tatweel
+    and hard line breaks. Returns the per-character byte offsets and the byte
+    offsets of the inserted tatweel.
     """
-    logical_text = _semantic_pdf_text(text)
-    if not ARABIC_CHAR.search(logical_text):
-        return logical_text
-
-    clusters: list[str] = []
-    for char in logical_text:
-        if clusters and (unicodedata.combining(char) or char in "\u200c\u200d"):
-            clusters[-1] += char
-        else:
-            clusters.append(char)
-    return "".join(reversed(clusters))
-
-
-def _semantic_font_path() -> str:
-    """Locate a Unicode font that preserves base Arabic code points."""
-    candidates = (
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/usr/share/fonts/opentype/fonts-hosny-amiri/Amiri-Regular.ttf",
-        "/usr/share/fonts/opentype/amiri/Amiri-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
-    )
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-    raise RuntimeError(
-        "OpenITI selectable PDFs need Arial Unicode, Amiri, or Noto Naskh Arabic."
-    )
+    offsets: list[int] = []
+    synthetic: set[int] = set()
+    cursor = 0
+    byte = 0
+    for char in rendered:
+        if cursor < len(source) and char == source[cursor]:
+            offsets.append(byte)
+            cursor += 1
+        elif char == TATWEEL:
+            synthetic.add(byte)
+        elif char != "\n":
+            raise ValueError("rendered text is not the source with insertions")
+        byte += len(char.encode("utf-8"))
+    if cursor != len(source):
+        raise ValueError("rendered text dropped source characters")
+    return offsets, frozenset(synthetic)
 
 
-def _subset_semantic_font(source_path: str, text: str, output_path: str) -> None:
-    """Subset the hidden text font so accessibility does not inflate the PDF."""
+def _visual_line_text(
+    layout_bytes: bytes, line: Any, synthetic: Collection[int]
+) -> list[tuple[str, int]]:
+    """Return one laid-out line's characters in visual (left-to-right) order.
+
+    Each character carries its logical byte offset. Pango lists a line's
+    runs in visual order; the characters of a right-to-left run are reversed
+    one by one. This is how PDFs store shaped RTL text: glyphs left to right,
+    each mapped to one character, which readers turn back into logical order.
+    """
+    pieces: list[tuple[str, int]] = []
+    right_to_left = False
+    for run in line.runs or []:
+        item = run.item
+        right_to_left = right_to_left or bool(item.analysis.level % 2)
+        chars: list[tuple[str, int]] = []
+        offset = item.offset
+        for char in layout_bytes[item.offset : item.offset + item.length].decode("utf-8"):
+            if char not in (LRI, PDI, "\n") and not (char == TATWEEL and offset in synthetic):
+                chars.append((char, offset))
+            offset += len(char.encode("utf-8"))
+        pieces.extend(reversed(chars) if item.analysis.level % 2 else chars)
+    if pieces and right_to_left:
+        # A RIGHT-TO-LEFT MARK first in the stream (the line's logical end)
+        # tells readers that rebuild direction from the glyph stream (MuPDF)
+        # that the line is RTL; without it a final vowel mark or closing
+        # quote at the left edge is read as left-to-right and moved.
+        pieces.insert(0, (RLM, -1))
+    return pieces
+
+
+_SEMANTIC_FONT_CANDIDATES = (
+    # Broad symbol coverage first, then fonts that cover the whole Arabic
+    # block (Arial Unicode lacks U+0653-U+0657 and the rarer letters).
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/SFArabic.ttf",
+    "/System/Library/Fonts/GeezaPro.ttc",
+    "/usr/share/fonts/opentype/fonts-hosny-amiri/Amiri-Regular.ttf",
+    "/usr/share/fonts/opentype/amiri/Amiri-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+
+
+def _semantic_font_paths() -> list[str]:
+    """Locate Unicode fonts whose cmaps name every text-layer character."""
+    paths = [path for path in _SEMANTIC_FONT_CANDIDATES if os.path.isfile(path)]
+    if not paths:
+        raise RuntimeError(
+            "OpenITI selectable PDFs need Arial Unicode, SF Arabic, Amiri, or Noto Naskh Arabic."
+        )
+    return paths
+
+
+def _semantic_fonts(text: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Subset a fallback chain of fonts covering ``text``.
+
+    Returns the fonts (resource name, bytes, glyph ids, advances) and the
+    font index for each character. Letters, marks or digits that no font
+    names fail loudly: a silently missing glyph is lost source text.
+    """
     try:
         from fontTools import subset
         from fontTools.ttLib import TTFont
@@ -154,100 +212,152 @@ def _subset_semantic_font(source_path: str, text: str, output_path: str) -> None
             "OpenITI selectable PDFs need fonttools; install versed-pdf[pdf]."
         ) from exc
 
-    font = TTFont(source_path)
-    subsetter = subset.Subsetter(options=subset.Options())
-    subsetter.populate(unicodes={ord(char) for char in text})
-    subsetter.subset(font)
-    font.save(output_path)
+    remaining = {char for char in text if not (char.isspace() and char != " ")}
+    fonts: list[dict[str, Any]] = []
+    char_font: dict[str, int] = {}
+    for path in _semantic_font_paths():
+        if not remaining:
+            break
+        font = TTFont(path, fontNumber=0, lazy=True)
+        covered = {char for char in remaining if ord(char) in (font.getBestCmap() or {})}
+        if not covered:
+            continue
+        options = subset.Options()
+        options.layout_features = []
+        options.font_number = 0
+        subsetter = subset.Subsetter(options=options)
+        subsetter.populate(unicodes={ord(char) for char in covered})
+        font = TTFont(path, fontNumber=0)
+        subsetter.subset(font)
+        buffer = BytesIO()
+        font.save(buffer)
+        font_bytes = buffer.getvalue()
+        font = TTFont(BytesIO(font_bytes))
+        cmap = font.getBestCmap()
+        glyph_order = font.getGlyphOrder()
+        glyph_index = {glyph: index for index, glyph in enumerate(glyph_order)}
+        metrics = font["hmtx"].metrics
+        units = font["head"].unitsPerEm
+        fonts.append({
+            "name": f"VersedText{len(fonts)}",
+            "bytes": font_bytes,
+            "glyph": {char: glyph_index[cmap[ord(char)]] for char in covered},
+            "advance": {char: metrics[cmap[ord(char)]][0] / units for char in covered},
+        })
+        for char in covered:
+            char_font[char] = len(fonts) - 1
+        remaining -= covered
+
+    missing = sorted(
+        char for char in remaining if unicodedata.category(char)[0] in "LMN"
+    )
+    if missing:
+        raise RuntimeError(
+            "OpenITI text layer fonts lack characters: "
+            + " ".join(f"U+{ord(char):04X}" for char in missing)
+        )
+    return fonts, char_font
 
 
 def _attach_semantic_text_layer(
     out_path: str,
-    page_text: dict[int, list[tuple[str, float, float, float, float]]],
+    page_text: dict[int, list[tuple[list[tuple[str, int]], float, float, float, float]]],
 ) -> None:
-    """Replace outlined body pages with compact images and searchable text."""
+    """Add an invisible, searchable text layer over the Cairo vector pages.
+
+    Cairo receives glyph outlines (``layout_path``), so the drawn page holds
+    no text. Each laid-out line gets invisible glyphs (render mode 3) in
+    visual order, one glyph per character, with the font's ToUnicode map
+    naming the source character, stretched over the line's drawn extent.
+    The vector page itself is left untouched.
+
+    Each right-to-left line opens with a RIGHT-TO-LEFT MARK glyph inside an
+    empty ``/ActualText`` span: MuPDF needs the strong RTL anchor to read a
+    line-final vowel mark correctly, and the span keeps the mark itself out
+    of MuPDF and Poppler text (PDFKit ignores ActualText and returns it as
+    an invisible U+200F at the line end).
+
+    Rejected after measuring PyMuPDF, Poppler and PDFKit: line-level
+    ``/ActualText`` spans (MuPDF and Poppler spread the replacement string
+    over the glyph positions and reverse it; PDFKit ignores it), Cairo's own
+    text (``show_layout``: split words and presentation forms in all three),
+    and logical-order glyphs placed right to left (PDFKit reverses them).
+    """
     try:
         import fitz
-        from PIL import Image
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise RuntimeError(
-            "OpenITI PDF rendering needs PyMuPDF and Pillow for a correct Arabic text layer. "
+            "OpenITI PDF rendering needs PyMuPDF for a correct Arabic text layer. "
             "Install versed-pdf[pdf]."
         ) from exc
 
+    all_text = "".join(
+        char for lines in page_text.values() for line in lines for char, _ in line[0]
+    )
+    if not all_text.strip():
+        return
+    fonts, char_font = _semantic_fonts(all_text)
+
     output_dir = os.path.dirname(os.path.abspath(out_path))
     with tempfile.TemporaryDirectory(prefix=".versed-pdf-", dir=output_dir) as temp_dir:
-        subset_font_path = os.path.join(temp_dir, "semantic.ttf")
         semantic_path = os.path.join(temp_dir, "semantic.pdf")
-        all_text = "".join(
-            _semantic_pdf_text(line[0])
-            for lines in page_text.values()
-            for line in lines
-        )
-        _subset_semantic_font(_semantic_font_path(), all_text, subset_font_path)
-        semantic_font = fitz.Font(fontfile=subset_font_path)
-
-        with fitz.open(out_path) as source_pdf, fitz.open() as output_pdf:
-            for page_index, source_page in enumerate(source_pdf):
-                if page_index not in page_text:
-                    output_pdf.insert_pdf(
-                        source_pdf, from_page=page_index, to_page=page_index
-                    )
+        with fitz.open(out_path) as pdf:
+            for page_index in sorted(page_text):
+                lines = page_text[page_index]
+                if page_index >= pdf.page_count or not lines:
                     continue
-
-                page = output_pdf.new_page(
-                    width=source_page.rect.width,
-                    height=source_page.rect.height,
-                )
-                pixmap = source_page.get_pixmap(dpi=200, alpha=False)
-                image = Image.frombytes(
-                    "RGB", (pixmap.width, pixmap.height), pixmap.samples
-                )
-                image = image.quantize(
-                    colors=16,
-                    method=Image.Quantize.FASTOCTREE,
-                    dither=Image.Dither.NONE,
-                )
-                image_bytes = BytesIO()
-                image.save(image_bytes, format="PNG", optimize=True)
-                page.insert_image(page.rect, stream=image_bytes.getvalue())
-
-                lines = sorted(
-                    page_text[page_index], key=lambda line: line[2]
-                )
-                text_writer = fitz.TextWriter(page.rect)
-                for text, x, y, width, height in lines:
-                    proxy_text = _pdfkit_proxy_text(text)
-                    if not proxy_text:
+                page = pdf[page_index]
+                page_height = page.rect.height
+                operators: list[str] = []
+                used: set[int] = set()
+                for visual, x, baseline, width, height in lines:
+                    runs: list[tuple[int, list[str]]] = []
+                    for char, _ in visual:
+                        if char not in char_font:
+                            continue
+                        index = char_font[char]
+                        if runs and runs[-1][0] == index and RLM not in (char, runs[-1][1][-1]):
+                            runs[-1][1].append(char)
+                        else:
+                            runs.append((index, [char]))
+                    natural = sum(
+                        fonts[index]["advance"][char] for index, chars in runs for char in chars
+                    )
+                    if not runs or natural <= 0:
                         continue
                     font_size = max(4.0, height * 0.75)
-                    text_width = semantic_font.text_length(
-                        proxy_text, fontsize=font_size
+                    scale = 100.0 * width / (natural * font_size) if width > 0 else 100.0
+                    shows = []
+                    for index, chars in runs:
+                        used.add(index)
+                        glyphs = "".join(f"{fonts[index]['glyph'][char]:04X}" for char in chars)
+                        show = f"/{fonts[index]['name']} {font_size:.2f} Tf <{glyphs}> Tj"
+                        if chars == [RLM]:
+                            # The direction anchor is not text: an empty
+                            # /ActualText keeps it out of copied text in
+                            # readers that honour it (MuPDF, Poppler).
+                            show = f"/Span <</ActualText ()>> BDC {show} EMC"
+                        shows.append(show)
+                    operators.append(
+                        f"{scale:.2f} Tz 1 0 0 1 {x:.2f} {page_height - baseline:.2f} Tm "
+                        + " ".join(shows)
                     )
-                    max_width = page.rect.width - 72.0
-                    if text_width > max_width:
-                        font_size *= max_width / text_width
-                        text_width = max_width
-                    column_x = max(36.0, page.rect.width - 36.0 - text_width)
-                    baseline = y + height * 0.8
-                    text_writer.append(
-                        fitz.Point(column_x, baseline),
-                        proxy_text,
-                        font=semantic_font,
-                        fontsize=font_size,
-                    )
-                text_writer.write_text(page, render_mode=3, overlay=True)
-
-            output_pdf.save(
-                semantic_path,
-                garbage=4,
-                deflate=True,
-                deflate_images=True,
-                deflate_fonts=True,
-                use_objstms=1,
-                compression_effort=100,
-            )
-
+                if not operators:
+                    continue
+                page.wrap_contents()
+                for index in sorted(used):
+                    page.insert_font(fontname=fonts[index]["name"], fontbuffer=fonts[index]["bytes"])
+                stream = "q BT 3 Tr\n" + "\n".join(operators) + "\nET Q\n"
+                xref = pdf.get_new_xref()
+                pdf.update_object(xref, "<<>>")
+                pdf.update_stream(xref, stream.encode("ascii"))
+                contents = page.get_contents()
+                pdf.xref_set_key(
+                    page.xref,
+                    "Contents",
+                    "[" + " ".join(f"{item} 0 R" for item in [*contents, xref]) + "]",
+                )
+            pdf.save(semantic_path, garbage=4, deflate=True, deflate_fonts=True)
         os.replace(semantic_path, out_path)
 
 
@@ -554,7 +664,7 @@ def render_book(
     current_chapter = doc.title or ""
     current_section = ""
     all_word_coords: list[dict] = []
-    semantic_page_text: dict[int, list[tuple[str, float, float, float, float]]] = {}
+    semantic_page_text: dict[int, list[tuple[list[tuple[str, int]], float, float, float, float]]] = {}
     current_block_index = 0
     pending_apparatus_notes: list[str] = []
     active_apparatus_notes: list[str] = []
@@ -585,49 +695,62 @@ def render_book(
         _, ext = layout.get_pixel_extents()
         return ext.width
 
-    def paint_layout(layout: Any) -> None:
-        """Paint shaped text without preserving Cairo's visual-order text map."""
+    def paint_layout(layout: Any, synthetic: Collection[int] = frozenset()) -> None:
+        """Paint shaped outlines and record each line for the text layer."""
         x, y = cr.get_current_point()
         rendered_bytes = layout.get_text().encode("utf-8")
         physical_page = page_num if has_front_matter else page_num - 1
         page_lines = semantic_page_text.setdefault(physical_page, [])
-        for line in layout.get_lines_readonly():
-            line_text = rendered_bytes[
-                line.start_index : line.start_index + line.length
-            ].decode("utf-8")
+        line_iter = layout.get_iter()
+        while True:
+            line = line_iter.get_line_readonly()
             _, logical = line.get_pixel_extents()
-            line_position = layout.index_to_pos(line.start_index)
-            page_lines.append(
-                (
-                    line_text,
-                    x + logical.x,
-                    y + line_position.y / Pango.SCALE,
-                    logical.width,
-                    line_position.height / Pango.SCALE,
+            _, layout_logical = line_iter.get_line_extents()
+            visual = _visual_line_text(rendered_bytes, line, synthetic)
+            if any(not char.isspace() for char, _ in visual):
+                page_lines.append(
+                    (
+                        visual,
+                        x + layout_logical.x / Pango.SCALE,
+                        y + line_iter.get_baseline() / Pango.SCALE,
+                        layout_logical.width / Pango.SCALE,
+                        logical.height,
+                    )
                 )
-            )
+            if not line_iter.next_line():
+                break
         PangoCairo.layout_path(cr, layout)
         cr.fill()
+
+    def apparatus_layout() -> Any:
+        layout = make_layout(font_size=max(7, theme.size_body - 3), width=tw())
+        layout.set_alignment(Pango.Alignment.LEFT)
+        layout.set_justify(False)
+        layout.set_line_spacing(1.15)
+        return layout
+
+    def apparatus_height(layout: Any, notes: list[str]) -> float:
+        layout.set_text(protect_ltr_runs(" \u2022 ".join(notes)), -1)
+        _, ext = layout.get_pixel_extents()
+        return ext.height
 
     def apparatus_reserve_height(notes: list[str]) -> float:
         clean_notes = [note.strip() for note in notes if note.strip()]
         if not clean_notes:
             return 0.0
-        combined = " \u2022 ".join(clean_notes)
-        if len(combined) > theme.footnote_max_chars:
-            combined = combined[: theme.footnote_max_chars].rstrip() + "..."
-        layout = make_layout(font_size=max(7, theme.size_body - 3), width=tw())
-        layout.set_alignment(Pango.Alignment.LEFT)
-        layout.set_justify(False)
-        layout.set_line_spacing(1.15)
-        layout.set_text(protect_ltr_runs(combined), -1)
-        _, ext = layout.get_pixel_extents()
+        height = apparatus_height(apparatus_layout(), clean_notes)
         # The rule and breathing room belong to pages that actually carry a
         # note; reserving the theme maximum on every page leaves six blank
         # body lines in texts whose references have no apparatus stream.
-        return min(theme.footnote_area_height, max(24.0, ext.height + 16.0))
+        return min(theme.footnote_area_height, max(24.0, height + 16.0))
 
-    def render_pending_apparatus_notes() -> None:
+    def render_pending_apparatus_notes(whole_page: bool = False) -> None:
+        """Draw as much pending apparatus as fits; carry the rest forward.
+
+        No source text is ever dropped: a note too long for this page is cut
+        at a word boundary and its remainder opens the next page's apparatus.
+        ``whole_page`` gives a notes-only page its full body area.
+        """
         if page_num <= 0 or not pending_apparatus_notes:
             return
         notes = [note.strip() for note in pending_apparatus_notes if note.strip()]
@@ -635,49 +758,40 @@ def render_book(
             pending_apparatus_notes.clear()
             return
 
-        font_size = max(7, theme.size_body - 3)
-        reserve = apparatus_reserve_height(notes)
-        rule_y = H - theme.margin_bottom - reserve + 6
+        if whole_page:
+            rule_y = theme.margin_top
+        else:
+            rule_y = H - theme.margin_bottom - apparatus_reserve_height(notes) + 6
         text_y = rule_y + 8
         max_note_h = max(18, (H - theme.margin_bottom / 2 - 8) - text_y)
 
         selected: list[str] = []
         remaining = list(notes)
-        layout = make_layout(font_size=font_size, width=tw())
-        layout.set_alignment(Pango.Alignment.LEFT)
-        layout.set_justify(False)
-        layout.set_line_spacing(1.15)
+        layout = apparatus_layout()
 
         while remaining:
-            candidate_notes = selected + [remaining[0]]
-            combined = " \u2022 ".join(candidate_notes)
-            if len(combined) > theme.footnote_max_chars:
-                combined = combined[: theme.footnote_max_chars].rstrip() + "..."
-            layout.set_text(protect_ltr_runs(combined), -1)
-            _, ext = layout.get_pixel_extents()
-            if ext.height <= max_note_h:
+            if apparatus_height(layout, [*selected, remaining[0]]) <= max_note_h:
                 selected.append(remaining.pop(0))
                 continue
-            if not selected:
-                clipped = remaining.pop(0)
-                lo, hi = 1, min(len(clipped), theme.footnote_max_chars)
-                best = ""
-                while lo <= hi:
-                    mid = (lo + hi) // 2
-                    trial = clipped[:mid].rstrip() + "..."
-                    layout.set_text(protect_ltr_runs(trial), -1)
-                    _, trial_ext = layout.get_pixel_extents()
-                    if trial_ext.height <= max_note_h:
-                        best = trial
-                        lo = mid + 1
-                    else:
-                        hi = mid - 1
-                selected.append(best or "...")
+            words = remaining[0].split(" ")
+            lo, hi, best = 1, len(words) - 1, 0
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                if apparatus_height(layout, [*selected, " ".join(words[:mid])]) <= max_note_h:
+                    best, lo = mid, mid + 1
+                else:
+                    hi = mid - 1
+            if not best and not selected:
+                # Not even one word fits: draw it anyway so the stream advances.
+                best = 1
+            if best:
+                selected.append(" ".join(words[:best]))
+                rest = " ".join(words[best:]).strip()
+                if rest:
+                    remaining[0] = rest
+                else:
+                    remaining.pop(0)
             break
-
-        combined = " \u2022 ".join(selected)
-        if remaining:
-            combined = combined.rstrip() + " ..."
 
         cr.set_source_rgb(*theme.color_apparatus)
         cr.set_line_width(0.25)
@@ -685,16 +799,15 @@ def render_book(
         cr.line_to(ml() + tw() * 0.38, rule_y)
         cr.stroke()
 
-        protected_combined = protect_ltr_runs(combined)
-        layout.set_text(protected_combined, -1)
+        layout.set_text(protect_ltr_runs(" \u2022 ".join(selected)), -1)
         cr.move_to(ml(), text_y)
         paint_layout(layout)
         pending_apparatus_notes[:] = remaining
 
-    def decorate_current_page() -> None:
+    def decorate_current_page(notes_only: bool = False) -> None:
         if page_num <= 0:
             return
-        render_pending_apparatus_notes()
+        render_pending_apparatus_notes(whole_page=notes_only)
         num_str = str(page_num).translate(W2E)
         cr.set_source_rgb(*theme.color_ornament)
         num_layout = make_layout(font_size=theme.size_page_num, width=W)
@@ -745,13 +858,26 @@ def render_book(
         spacing_after: Optional[float] = None,
         use_kashida: bool = False,
         track_words: bool = True,
+        decoration_words: int = 0,
+        source_words: Optional[list[str]] = None,
         _allow_split: bool = True,
-        _word_index_offset: int = 0,
+        _words: Optional[list[tuple[int, int, str, int]]] = None,
+        _synthetic: frozenset[int] = frozenset(),
         _min_after_break: int = 2,
     ) -> None:
+        """Lay out and paint one block of text, flowing across pages.
+
+        The word stream names source words only: ``decoration_words`` leading
+        drawn words (entry markers, labels) get no box, and ``source_words``
+        names the remaining drawn words when the drawing rewrites them (for
+        example Arabic-Indic ordinals). Words are located by their byte span
+        in the source, so kashida and page or line breaks never split or
+        rename a word.
+        """
         nonlocal y, current_block_index
-        if not centered:
-            text = protect_ltr_runs(text)
+        if _words is None:
+            source = text if centered else protect_ltr_runs(text)
+            text = source
         layout = make_layout(font_size=font_size, bold=bold)
         # In Pango's bidirectional layout, LEFT aligns RTL text to the physical
         # right edge of the layout box; RIGHT sends it to the physical left.
@@ -760,8 +886,13 @@ def render_book(
         # mixed editorial apparatus look jagged. Keep body blocks flush-right
         # and leave true justification to a later shaping pass.
         layout.set_justify(False)
+        if _words is not None:
+            # A page-split chunk is already broken into the parent's lines.
+            # Re-wrapping them can add lines (Pango re-breaks some lines laid
+            # out alone, e.g. around " ، "), pushing text past the bottom.
+            layout.set_wrap(Pango.WrapMode.NONE)
         layout.set_text(text, -1)
-        if use_kashida and theme.kashida and not centered:
+        if use_kashida and theme.kashida and not centered and _words is None:
             text = _per_line_kashida(
                 layout, text, tw(),
                 lambda t: measure(t, font_size),
@@ -770,6 +901,24 @@ def render_book(
             layout.set_wrap(Pango.WrapMode.NONE)
             layout.set_text(text, -1)
         layout.set_line_spacing(theme.line_height)
+
+        if _words is None:
+            char_bytes, _synthetic = _align_rendered_to_source(text, source)
+            spans = [match.span() for match in re.finditer(r"\S+", source)]
+            _words = []
+            if track_words:
+                spans = spans[decoration_words:]
+                names = [_semantic_pdf_text(source[start:end]) for start, end in spans]
+                if source_words is not None:
+                    if len(source_words) != len(names):
+                        raise ValueError(
+                            f"drawn words {names!r} do not match source words {source_words!r}"
+                        )
+                    names = list(source_words)
+                for index, ((start, end), name) in enumerate(zip(spans, names)):
+                    if name:
+                        _words.append((char_bytes[start], char_bytes[end - 1], name, index))
+
         _, ext = layout.get_pixel_extents()
         spacing = spacing_after if spacing_after is not None else theme.size_body * 0.35
 
@@ -777,10 +926,11 @@ def render_book(
 
         if _allow_split and overflows_page:
             encoded = text.encode("utf-8")
-            lines = [
-                encoded[line.start_index:line.start_index + line.length].decode("utf-8")
+            line_spans = [
+                (line.start_index, line.start_index + line.length)
                 for line in layout.get_lines_readonly()
             ]
+            lines = [encoded[start:end].decode("utf-8") for start, end in line_spans]
             if len(lines) > 1:
 
                 def capacity(line_texts: list[str], available: float) -> int:
@@ -793,6 +943,7 @@ def render_book(
                             Pango.Alignment.CENTER if centered else Pango.Alignment.LEFT
                         )
                         candidate_layout.set_justify(False)
+                        candidate_layout.set_wrap(Pango.WrapMode.NONE)
                         candidate_layout.set_line_spacing(theme.line_height)
                         candidate_layout.set_text(candidate, -1)
                         _, candidate_ext = candidate_layout.get_pixel_extents()
@@ -812,24 +963,58 @@ def render_book(
                     full_capacity,
                     min_after_break=_min_after_break,
                 )
-                chunks: list[str] = []
-                cursor = 0
-                for count in line_counts:
-                    if count == 0:
-                        chunks.append("")
-                        continue
-                    chunks.append("\n".join(lines[cursor : cursor + count]))
-                    cursor += count
 
-                word_offset = _word_index_offset
+                def chunk_offset(line_index: int, first: int, byte: int) -> int:
+                    # Chunk text is its lines joined with "\n", one byte each.
+                    before = sum(
+                        len(lines[k].encode("utf-8")) + 1 for k in range(first, line_index)
+                    )
+                    return before + byte - line_spans[line_index][0]
+
+                def line_of(byte: int) -> int:
+                    for index, (start, end) in enumerate(line_spans):
+                        if start <= byte < end:
+                            return index
+                    return -1
+
                 rendered_chunk = False
-                for chunk_index, chunk in enumerate(chunks):
-                    if not chunk:
+                cursor = 0
+                for chunk_index, count in enumerate(line_counts):
+                    if count == 0:
                         new_page()
                         continue
+                    first, last = cursor, cursor + count
+                    cursor = last
+                    chunk = "\n".join(lines[first:last])
+                    chunk_words = []
+                    for start, end, name, index in _words:
+                        start_line = line_of(start)
+                        if not first <= start_line < last:
+                            continue
+                        end_line = line_of(end)
+                        if not first <= end_line < last:
+                            # The word runs onto the next page: box the part
+                            # drawn here.
+                            end_line = start_line
+                            end = line_spans[start_line][1] - 1
+                            while end > start and (encoded[end] & 0xC0) == 0x80:
+                                end -= 1
+                        chunk_words.append(
+                            (
+                                chunk_offset(start_line, first, start),
+                                chunk_offset(end_line, first, end),
+                                name,
+                                index,
+                            )
+                        )
+                    chunk_synthetic = frozenset(
+                        chunk_offset(line_of(byte), first, byte)
+                        for byte in _synthetic
+                        if first <= line_of(byte) < last
+                    )
                     if rendered_chunk:
                         new_page()
-                    is_last = chunk_index == len(chunks) - 1
+                    is_last = chunk_index == len(line_counts) - 1
                     draw_text(
                         chunk,
                         font_size=font_size,
@@ -841,10 +1026,10 @@ def render_book(
                         use_kashida=False,
                         track_words=track_words,
                         _allow_split=False,
-                        _word_index_offset=word_offset,
+                        _words=chunk_words,
+                        _synthetic=chunk_synthetic,
                         _min_after_break=_min_after_break,
                     )
-                    word_offset += len(chunk.split())
                     rendered_chunk = True
                 return
 
@@ -853,53 +1038,39 @@ def render_book(
             new_page()
 
         # Extract per-word coordinates before rendering
-        if track_words:
-            origin_x = ml()
-            origin_y = y
-            text_bytes = text.encode("utf-8")
-            words = text.split()
-            byte_offset = 0
-            for word_index, word in enumerate(words):
-                word_bytes = word.encode("utf-8")
-                # Find the byte offset of this word in the full text
-                pos_in_bytes = text_bytes.find(word_bytes, byte_offset)
-                if pos_in_bytes < 0:
-                    continue
-                # Get position of first char and end of last char
-                rect_start = layout.index_to_pos(pos_in_bytes)
-                # Pango uses UTF-8 byte offsets, but each index must still be
-                # a code-point boundary; subtracting one byte lands inside the
-                # final Arabic character and can corrupt cached layout state.
-                end_byte = pos_in_bytes + len(word[:-1].encode("utf-8"))
-                rect_end = layout.index_to_pos(end_byte)
-                # Pango returns values in Pango units (1/1024 pixel)
-                py = rect_start.y / Pango.SCALE
-                ph = rect_start.height / Pango.SCALE
-                # Compute word extent from start and end cursor positions
-                # For RTL, start.x > end.x; for LTR, start.x < end.x
-                edges = [
-                    rect_start.x / Pango.SCALE,
-                    (rect_start.x + rect_start.width) / Pango.SCALE,
-                    rect_end.x / Pango.SCALE,
-                    (rect_end.x + rect_end.width) / Pango.SCALE,
-                ]
-                px = min(edges)
-                pw = max(edges) - px
-                all_word_coords.append({
-                    "text": word.replace(LRI, "").replace(PDI, ""),
-                    "x": origin_x + px,
-                    "y": origin_y + py,
-                    "width": pw,
-                    "height": ph,
-                    "page": page_num,
-                    "block_index": current_block_index,
-                    "word_index": word_index + _word_index_offset,
-                })
-                byte_offset = pos_in_bytes + len(word_bytes)
+        origin_x = ml()
+        origin_y = y
+        for start_byte, last_char_byte, name, word_index in _words:
+            rect_start = layout.index_to_pos(start_byte)
+            # Pango uses UTF-8 byte offsets, but each index must still be a
+            # code-point boundary; the last character's own offset is one.
+            rect_end = layout.index_to_pos(last_char_byte)
+            # Pango returns values in Pango units (1/1024 pixel)
+            py = rect_start.y / Pango.SCALE
+            ph = rect_start.height / Pango.SCALE
+            # For RTL, start.x > end.x; for LTR, start.x < end.x
+            edges = [
+                rect_start.x / Pango.SCALE,
+                (rect_start.x + rect_start.width) / Pango.SCALE,
+                rect_end.x / Pango.SCALE,
+                (rect_end.x + rect_end.width) / Pango.SCALE,
+            ]
+            px = min(edges)
+            pw = max(edges) - px
+            all_word_coords.append({
+                "text": name,
+                "x": origin_x + px,
+                "y": origin_y + py,
+                "width": pw,
+                "height": ph,
+                "page": page_num,
+                "block_index": current_block_index,
+                "word_index": word_index,
+            })
 
         cr.set_source_rgb(*(color or theme.color_body))
         cr.move_to(ml(), y)
-        paint_layout(layout)
+        paint_layout(layout, _synthetic)
         y += ext.height + spacing
 
     def draw_line(width_frac: float = 0.5, thickness: float = 0.5) -> None:
@@ -927,7 +1098,19 @@ def render_book(
         cr.stroke()
         y += 10
 
-    def draw_verse_pair(a: str, b: str) -> None:
+    def draw_verse_number(number: Optional[str], row_y: float) -> None:
+        """Print a source verse number in the outer margin, outside the word stream."""
+        if not number:
+            return
+        cr.set_source_rgb(*theme.color_page_ref)
+        number_layout = make_layout(font_size=theme.size_page_ref, width=30)
+        number_layout.set_alignment(Pango.Alignment.CENTER)
+        number_layout.set_text(f"({str(number).strip('()').translate(W2E)})", -1)
+        x = W - mr() + 4 if page_num % 2 == 0 else ml() - 34
+        cr.move_to(x, row_y + 2)
+        paint_layout(number_layout)
+
+    def draw_verse_pair(a: str, b: str, number: Optional[str] = None) -> None:
         nonlocal y
         col_w = (tw() - 40) / 2
         left_layout = make_layout(font_size=theme.size_verse, width=col_w)
@@ -952,6 +1135,7 @@ def render_book(
         cr.set_source_rgb(*theme.color_verse)
         cr.move_to(ml(), y)
         paint_layout(right_layout)
+        draw_verse_number(number, y)
         y += row_h + 4
 
     page_num = 0
@@ -969,6 +1153,7 @@ def render_book(
             centered=True,
             bold=True,
             spacing_after=15,
+            track_words=False,
         )
         if doc.author:
             draw_text(
@@ -977,6 +1162,7 @@ def render_book(
                 color=theme.color_ornament,
                 centered=True,
                 spacing_after=20,
+                track_words=False,
             )
         y += 5
         draw_line(0.4, 0.8)
@@ -1111,6 +1297,8 @@ def render_book(
                 color=theme.color_morpho,
                 centered=True,
                 spacing_after=8,
+                track_words=bool(block.text),
+                source_words=block.text.split() if block.text else None,
             )
 
         elif block.type in ENTRY_MARKERS:
@@ -1124,7 +1312,15 @@ def render_book(
             color_key = ENTRY_COLORS.get(block.type, "color_body")
             color = getattr(theme, color_key, theme.color_body)
             heading = _format_entry_heading(block.text)
-            draw_text(f"{marker}  {heading}", font_size=theme.size_body, color=color, bold=True, spacing_after=6)
+            draw_text(
+                f"{marker}  {heading}",
+                font_size=theme.size_body,
+                color=color,
+                bold=True,
+                spacing_after=6,
+                decoration_words=len(marker.split()),
+                source_words=block.text.split(),
+            )
 
         elif block.type == BlockType.BASMALA:
             y += 8
@@ -1149,9 +1345,11 @@ def render_book(
         elif block.type == BlockType.VERSE_PAIR:
             if prev and prev != BlockType.VERSE_PAIR:
                 y += 6
-            draw_verse_pair(block.hemistich_a, block.hemistich_b)
+            draw_verse_pair(block.hemistich_a, block.hemistich_b, block.meta.get("verse_number"))
 
         elif block.type == BlockType.VERSE_LINE:
+            check_space(theme.size_verse * 2)
+            draw_verse_number(block.meta.get("verse_number"), y)
             draw_text(
                 block.text,
                 font_size=theme.size_verse,
@@ -1239,6 +1437,7 @@ def render_book(
                 color=theme.color_morpho,
                 centered=True,
                 spacing_after=4,
+                track_words=False,
             )
 
         elif block.type == BlockType.ADMIN_DIVISION:
@@ -1250,6 +1449,7 @@ def render_book(
                 font_size=theme.size_body - 1,
                 color=theme.color_admin,
                 spacing_after=2,
+                decoration_words=len(f"{label}:".split()),
             )
 
         elif block.type == BlockType.ROUTE:
@@ -1261,6 +1461,7 @@ def render_book(
                 font_size=theme.size_body - 1,
                 color=theme.color_admin,
                 spacing_after=2,
+                decoration_words=len(f"{label}:".split()),
             )
 
         elif block.type == BlockType.LACUNA:
@@ -1270,6 +1471,7 @@ def render_book(
                 color=theme.color_lacuna,
                 centered=True,
                 spacing_after=6,
+                track_words=False,
             )
 
         elif block.type == BlockType.PARAGRAPH:
@@ -1291,6 +1493,12 @@ def render_book(
             current_block_index += 1
 
     decorate_current_page()
+    # Apparatus still pending after the last body line continues on
+    # notes-only pages; it is never dropped.
+    while pending_apparatus_notes:
+        cr.show_page()
+        page_num += 1
+        decorate_current_page(notes_only=True)
 
     surface.finish()
     _attach_semantic_text_layer(out_path, semantic_page_text)
