@@ -314,6 +314,9 @@ def _percent_verse_blocks(body: str) -> List[Block]:
             continue
         if segment.endswith(" |"):
             segment = segment[:-2].rstrip()
+        if segment == "$":
+            # An inline title separator with no title: markup only.
+            continue
         if segment.startswith("$ "):
             # Inline title separator (" $ ") inside a verse line.
             flush()

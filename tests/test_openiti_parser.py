@@ -417,3 +417,10 @@ def test_inline_title_inside_a_percent_verse_line_is_a_title():
         (BlockType.VERSE_PAIR, "وإن كلمة أطلقت فالشهرة اعتمد"),
         (BlockType.TITLE, "& باب البسملة وأم القرآن"),
     ]
+
+
+def test_empty_inline_title_marker_in_a_verse_line_is_not_printed():
+    # 0795IbnRajabHanbali.KalimatIkhsas ends verse runs with "% $".
+    doc = _parse_body("# % إذا أنا لم أجد من الحب وصلا % رمت في النار منزلا ومقيلا % $\n")
+
+    assert _printed_words(doc) == "إذا أنا لم أجد من الحب وصلا رمت في النار منزلا ومقيلا".split()

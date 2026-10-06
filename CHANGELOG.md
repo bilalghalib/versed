@@ -35,7 +35,8 @@
   words on one side (OCR noise such as `قدهة 1 %~% 11` in
   0671AbuCabdAllahQurtubi.Asna) stays one verse line, not a fake couplet.
 - An inline title (` $ `) inside a `%` verse line is a title, not a verse
-  line (0833IbnJazari.DurraMudiyya printed "$ & باب البسملة").
+  line (0833IbnJazari.DurraMudiyya printed "$ & باب البسملة"); an empty one
+  (`% $`, 0795IbnRajabHanbali.KalimatIkhsas) is dropped as markup.
 - A verse placeholder merged with neighbouring text by the bridge is still
   substituted instead of printing `VRSDVERSE…`.
 
