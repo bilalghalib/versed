@@ -192,6 +192,98 @@ def _normalize_input_for_openiti_parser(text: str) -> str:
     return "\n".join(normalized_lines)
 
 
+_VERSE_PLACEHOLDER = re.compile(r"^VRSDVERSE(\d+)$")
+_VERSE_NUMBER = re.compile(r"^\(?[0-9٠-٩]+\)?$")
+_PERCENT_VERSE_LINE = re.compile(r"^#?\s*%")
+
+
+def _percent_verse_blocks(body: str) -> List[Block]:
+    """Parse one ``%``-delimited verse line (with its ``~~`` continuations).
+
+    Shamela-derived OpenITI poetry writes ``% A % B % % 3``: hemistichs
+    between ``%`` marks, sometimes a doubled ``%``, and a trailing verse
+    number. The upstream parser reads the number as the second hemistich and
+    turns the real first hemistich into a paragraph, so these lines are split
+    here instead. A purely numeric segment closes the verse(s) before it and
+    is kept as ``meta["verse_number"]``; every other segment is a hemistich,
+    paired in source order, with an odd one left as a verse line.
+    """
+    segments = [
+        _strip_inline_markers(part).strip()
+        for part in body.split("%")
+    ]
+    segments = [part for part in segments if part and part not in {"~", "|"}]
+
+    blocks: List[Block] = []
+    pending: List[str] = []
+
+    def flush() -> None:
+        for index in range(0, len(pending) - 1, 2):
+            blocks.append(Block(
+                BlockType.VERSE_PAIR, "",
+                hemistich_a=pending[index], hemistich_b=pending[index + 1],
+            ))
+        if len(pending) % 2:
+            blocks.append(Block(BlockType.VERSE_LINE, pending[-1]))
+        pending.clear()
+
+    for segment in segments:
+        if _VERSE_NUMBER.match(segment):
+            had_pending = bool(pending)
+            flush()
+            if had_pending and "verse_number" not in blocks[-1].meta:
+                blocks[-1].meta["verse_number"] = segment
+            else:
+                # A number with no verse of its own is still source text.
+                blocks.append(Block(BlockType.PARAGRAPH, segment))
+            continue
+        if segment.endswith(" |"):
+            segment = segment[:-2].rstrip()
+        pending.append(segment)
+    flush()
+    return blocks
+
+
+def _extract_percent_verses(text: str) -> Tuple[str, List[List[Block]]]:
+    """Replace ``%``-delimited verse lines with placeholders for the bridge.
+
+    Page markers on the line stay on the placeholder line so the upstream
+    parser still assigns the verse to the right printed page.
+    """
+    out: List[str] = []
+    verses: List[List[Block]] = []
+    lines = text.splitlines()
+    index = 0
+    in_body = META_END not in text
+    while index < len(lines):
+        raw_line = lines[index]
+        index += 1
+        stripped = raw_line.strip()
+        if not in_body:
+            out.append(raw_line)
+            in_body = META_END in raw_line
+            continue
+        if stripped.startswith("#") and stripped[1:2] not in ("", " ", "%"):
+            out.append(raw_line)
+            continue
+        if not _PERCENT_VERSE_LINE.match(stripped):
+            out.append(raw_line)
+            continue
+        logical = stripped.lstrip("#").strip()
+        while index < len(lines) and lines[index].lstrip().startswith("~~"):
+            logical += " " + lines[index].lstrip()[2:].strip()
+            index += 1
+        pages = PAGE_TAG.findall(logical)
+        blocks = _percent_verse_blocks(PAGE_TAG.sub(" ", logical))
+        if not blocks:
+            out.append(raw_line)
+            continue
+        tags = " ".join(f"PageV{vol}P{page}" for vol, page in pages)
+        out.append(f"# VRSDVERSE{len(verses)} {tags}".rstrip())
+        verses.append(blocks)
+    return "\n".join(out), verses
+
+
 def _run_external_openiti_parser(text: str) -> Dict[str, Any]:
     try:
         proc = subprocess.run(
@@ -445,7 +537,8 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
     if META_END in text:
         header_text, _ = text.split(META_END, 1)
 
-    payload = _run_external_openiti_parser(_normalize_input_for_openiti_parser(text))
+    bridge_text, percent_verses = _extract_percent_verses(text)
+    payload = _run_external_openiti_parser(_normalize_input_for_openiti_parser(bridge_text))
     header_meta = _extract_metadata(header_text)
     doc = ParsedDocument(title=title, author=author, meta=header_meta)
 
@@ -535,6 +628,10 @@ def parse_openiti(text: str, title: str = "", author: str = "") -> ParsedDocumen
                 # Default: paragraph — apply inline classification
                 # Skip stray markup artifacts (lone #, empty content)
                 cleaned = _strip_inline_markers(content_str)
+                placeholder = _VERSE_PLACEHOLDER.match(cleaned)
+                if placeholder and int(placeholder.group(1)) < len(percent_verses):
+                    doc.blocks.extend(percent_verses[int(placeholder.group(1))])
+                    continue
                 if not cleaned or cleaned in ("#", "##", "###"):
                     continue
                 doc.blocks.extend(_layout_blocks_from_content(content_str, ext_block))
