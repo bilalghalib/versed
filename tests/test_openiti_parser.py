@@ -336,3 +336,36 @@ def test_scheme_repeated_biography_tag_is_not_printed():
     assert [(block.type, block.text) for block in doc.blocks] == [
         (BlockType.BIO_MAN, "أحمد بن حنبل"),
     ]
+
+
+def test_hemistich_divider_without_words_on_both_sides_is_not_a_couplet():
+    # 0671AbuCabdAllahQurtubi.Asna: OCR margin noise carries %~% ("قدهة 1 %~% 11").
+    # A couplet needs words on both sides; otherwise keep the line as one
+    # verse line, every character preserved.
+    doc = _parse_body(
+        "# قدهة 1 %~% 11\n"
+        "# 4 %~% \n"
+        "# وذلك في ذات الإله وإن يشا %~% يبارك على أوصال شلو ممزع\n"
+    )
+
+    shapes = [(block.type, block.text, block.hemistich_a, block.hemistich_b) for block in doc.blocks]
+    assert shapes == [
+        (BlockType.VERSE_LINE, "قدهة 1 11", "", ""),
+        (BlockType.VERSE_LINE, "4", "", ""),
+        (BlockType.VERSE_PAIR, "", "وذلك في ذات الإله وإن يشا", "يبارك على أوصال شلو ممزع"),
+    ]
+
+
+def test_text_after_a_line_initial_page_marker_is_kept():
+    # 0711IbnIbrahimCimadDinWasiti.Tadhkira: "PageV01P023 وتسديدهم ..." at the
+    # start of a continuation line lost every word after the marker.
+    doc = _parse_body(
+        "# وأدام توفيق السادة المبدئ بذكرهم\n"
+        "PageV01P023 وتسديدهم، وأجزل لهم حظهم، ومزيدهم\n"
+        "# السلام عليكم\n"
+    )
+
+    assert _printed_words(doc) == (
+        "وأدام توفيق السادة المبدئ بذكرهم وتسديدهم، وأجزل لهم حظهم، ومزيدهم السلام عليكم"
+    ).split()
+    assert any(block.type == BlockType.PAGE_REF and block.meta == {"vol": 1, "page": 23} for block in doc.blocks)
