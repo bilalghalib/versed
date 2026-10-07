@@ -54,6 +54,8 @@ cites the scheme category for each conformance case.
   order. Entry markers, labels, ordinal digit forms and other decoration get
   no box; a word broken across lines or pages keeps one box under its source
   spelling; synthetic kashida tatweel never appears in it.
-- Body pages stay Cairo vector outlines. An invisible text layer (one glyph
+- Body pages stay Cairo vector outlines, stored once per distinct glyph
+  (font, glyph id, colour) as a Form XObject and placed with `cm` + `Do` at
+  the positions Pango/HarfBuzz shaped. An invisible text layer (one glyph
   per character, visual order, ToUnicode to the source character) makes them
   copyable and searchable; synthetic tatweel and bidi isolates are excluded.

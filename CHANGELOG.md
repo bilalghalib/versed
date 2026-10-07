@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.2 (unreleased)
+
+### OpenITI typesetter
+
+- **Reading editions are small again, with the same text layer.** 1.3.0 and
+  1.3.1 filled a full glyph outline (`layout_path`) for every glyph
+  occurrence, so 0902Sakhawi.SirrMaktum's 48-page Archive edition was
+  20.8 MB. Each distinct (font, glyph id, colour) is now recorded once as a
+  Cairo recording surface, which Cairo writes as one Form XObject and
+  places per occurrence with `cm` + `Do`. Positions come from the shaped
+  layout (`Pango.Layout.serialize` glyph ids, advances and x/y offsets plus
+  the line iterator's run origins), and a test checks they reproduce
+  `layout_path` contour for contour, kashida, marks and mixed-direction
+  runs included. The page still holds no visible text: the only fonts are
+  the invisible semantic layer's, so PyMuPDF, Poppler and PDFKit extraction
+  is unchanged (byte-identical on the three books below). The semantic save
+  also writes object streams.
+- Measured with the versed-app Archive gate (cover, front matter, word map),
+  1.3.1 -> 1.3.2: Sakhawi.SirrMaktum 20.8 MB -> 1.25 MB (48 pp),
+  IbnSinanKhafaji.Diwan 46.6 MB -> 1.74 MB (117 pp), Ghazali.Tahafut
+  94.0 MB -> 4.0 MB (230 pp). Word maps identical; 150 dpi renders differ
+  only by antialiasing where joined glyphs overlap (max channel diff 69,
+  about 0.01% of samples above 32).
+
 ## 1.3.1 (unreleased)
 
 ### OpenITI typesetter
