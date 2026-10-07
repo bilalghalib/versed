@@ -959,3 +959,18 @@ def test_page_range_label():
     assert _page_range_label([5, 7]) == "5، 7"
     assert _page_range_label(["5a", "6"]) == "5a، 6"
 
+
+
+def test_title_blocks_box_their_voiced_words(tmp_path):
+    # 0728IbnTaymiyya.CaqidaWasitiyya: 363 timed words sat in TITLE blocks
+    # drawn without boxes.
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    blocks = [
+        Block(BlockType.TITLE, "فصل في الإيمان بالله"),
+        Block(BlockType.PARAGRAPH, "ومن الإيمان بالله"),
+    ]
+    _, result = _render(ParsedDocument(blocks=blocks), tmp_path)
+    assert [box["text"] for box in result["word_coordinates"]] == (
+        "فصل في الإيمان بالله ومن الإيمان بالله".split()
+    )

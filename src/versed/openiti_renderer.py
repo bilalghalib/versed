@@ -1571,6 +1571,7 @@ def render_book(
                 current_section = ""
             else:
                 current_section = block.text
+            # Titles are voiced like any heading, so their words get boxes.
             draw_text(
                 block.text,
                 font_size=size,
@@ -1578,7 +1579,6 @@ def render_book(
                 centered=True,
                 bold=True,
                 spacing_after=10,
-                track_words=False,
             )
 
         elif block.type == BlockType.HEADING_1:
