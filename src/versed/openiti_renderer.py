@@ -318,8 +318,8 @@ def _attach_semantic_text_layer(
 ) -> None:
     """Add an invisible, searchable text layer over the Cairo vector pages.
 
-    Cairo receives glyph outlines (``layout_path``), so the drawn page holds
-    no text. Each laid-out line gets invisible glyphs (render mode 3) in
+    The drawn page holds no text: each glyph is an outline fill in a shared
+    Form XObject (see ``paint_layout``). Each laid-out line gets invisible glyphs (render mode 3) in
     visual order, one glyph per character, with the font's ToUnicode map
     naming the source character, stretched over the line's drawn extent.
     The vector page itself is left untouched.
@@ -420,8 +420,80 @@ def _attach_semantic_text_layer(
                     "Contents",
                     "[" + " ".join(f"{item} 0 R" for item in [*contents, xref]) + "]",
                 )
-            pdf.save(semantic_path, garbage=4, deflate=True, deflate_fonts=True)
+            pdf.save(semantic_path, garbage=4, deflate=True, deflate_fonts=True, use_objstms=1)
         os.replace(semantic_path, out_path)
+
+
+_PANGO_GLYPH_EMPTY = 0x0FFFFFFF
+_PANGO_GLYPH_UNKNOWN_FLAG = 0x10000000
+
+
+def _layout_glyph_placements(layout: Any) -> Optional[list[tuple[Any, str, int, float, float]]]:
+    """Return each drawn glyph of ``layout`` as (font, font key, glyph id, dx, dy).
+
+    Offsets are in points from the layout origin and follow the placement
+    Pango's own renderer uses for ``layout_path``: run x from the line
+    iterator, then the shaped advances, x/y offsets and run rise. Kashida
+    and mark positioning therefore come straight from HarfBuzz.
+
+    Glyph ids and geometry are read from ``Pango.Layout.serialize`` because
+    PyGObject mis-marshals ``PangoGlyphString.glyphs`` (it reads the 20-byte
+    ``PangoGlyphInfo`` array with the wrong stride). Runs are paired with the
+    iterator's runs in order and checked by text offset and glyph count.
+
+    Returns ``None`` when the layout holds unknown-glyph boxes, which only
+    ``layout_path`` can draw.
+    """
+    import json
+
+    from gi.repository import Pango
+
+    output = json.loads(
+        layout.serialize(Pango.LayoutSerializeFlags.OUTPUT).get_data()
+    )["output"]
+    if output.get("unknown-glyphs"):
+        return None
+    runs = [run for line in output["lines"] for run in line.get("runs", [])]
+    scale = Pango.SCALE
+    placements: list[tuple[Any, str, int, float, float]] = []
+    line_iter = layout.get_iter()
+    index = 0
+    while True:
+        run = line_iter.get_run_readonly()
+        if run is not None:
+            if index >= len(runs):
+                raise RuntimeError("Pango layout runs disagree with the serialized layout")
+            data = runs[index]
+            index += 1
+            item = run.item
+            analysis = item.analysis
+            font = analysis.font
+            glyph_string = run.glyphs
+            if item.offset != data["offset"] or glyph_string.num_glyphs != len(data["glyphs"]):
+                raise RuntimeError("Pango layout runs disagree with the serialized layout")
+            font_key = json.dumps(data["font"], sort_keys=True)
+            _, logical = line_iter.get_run_extents()
+            base_x = logical.x + run.start_x_offset
+            base_y = line_iter.get_baseline() - run.y_offset
+            advance = 0
+            for glyph in data["glyphs"]:
+                glyph_id = glyph["glyph"]
+                if glyph_id & _PANGO_GLYPH_UNKNOWN_FLAG:
+                    return None
+                if glyph_id != _PANGO_GLYPH_EMPTY:
+                    placements.append((
+                        font,
+                        font_key,
+                        glyph_id,
+                        (base_x + advance + glyph.get("x-offset", 0)) / scale,
+                        (base_y + glyph.get("y-offset", 0)) / scale,
+                    ))
+                advance += glyph["width"]
+        if not line_iter.next_run():
+            break
+    if index != len(runs):
+        raise RuntimeError("Pango layout runs disagree with the serialized layout")
+    return placements
 
 
 def _configure_pango_backend(
@@ -773,6 +845,7 @@ def render_book(
     current_section = ""
     all_word_coords: list[dict] = []
     semantic_page_text: dict[int, list[tuple[list[VisualRun], float, float, float, float]]] = {}
+    glyph_forms: dict[tuple, Any] = {}
     current_block_index = 0
     pending_apparatus_notes: list[str] = []
     active_apparatus_notes: list[str] = []
@@ -804,7 +877,14 @@ def render_book(
         return ext.width
 
     def paint_layout(layout: Any, synthetic: Collection[int] = frozenset()) -> None:
-        """Paint shaped outlines and record each line for the text layer."""
+        """Paint shaped outlines and record each line for the text layer.
+
+        Each glyph is drawn as a reference to one shared outline form at the
+        position Pango's own ``layout_path`` would fill it (tested to match
+        exactly), so the page has no font text and no repeated outlines.
+        Layouts with unknown-glyph boxes or a non-solid source fall back to
+        ``layout_path``.
+        """
         x, y = cr.get_current_point()
         rendered_bytes = layout.get_text().encode("utf-8")
         physical_page = page_num if has_front_matter else page_num - 1
@@ -827,8 +907,48 @@ def render_book(
                 )
             if not line_iter.next_line():
                 break
-        PangoCairo.layout_path(cr, layout)
-        cr.fill()
+        source = cr.get_source()
+        placements = _layout_glyph_placements(layout)
+        if placements is None or not isinstance(source, cairo.SolidPattern):
+            PangoCairo.layout_path(cr, layout)
+            cr.fill()
+            return
+        rgba = source.get_rgba()
+        cr.new_path()
+        for font, font_key, glyph, dx, dy in placements:
+            form = glyph_form(font, font_key, glyph, rgba)
+            if form is None:
+                continue
+            cr.save()
+            cr.translate(x + dx, y + dy)
+            cr.set_source_surface(form, 0, 0)
+            cr.paint()
+            cr.restore()
+
+    def glyph_form(font: Any, font_key: str, glyph: int, rgba: tuple) -> Any:
+        """One recorded outline per (font, glyph, colour), reused by reference.
+
+        Cairo's PDF surface writes a recording surface once as a Form
+        XObject and draws every later use with ``cm`` + ``Do``, so a book
+        holds each distinct glyph shape once instead of a full outline per
+        occurrence. The form is an outline fill, never text, so the visible
+        page still contributes nothing to copied or searched text.
+        """
+        key = (font_key, glyph, rgba)
+        if key in glyph_forms:
+            return glyph_forms[key]
+        form = cairo.RecordingSurface(cairo.Content.COLOR_ALPHA, None)
+        form_cr = cairo.Context(form)
+        form_cr.set_scaled_font(PangoCairo.Font.get_scaled_font(font))
+        form_cr.glyph_path([cairo.Glyph(glyph, 0, 0)])
+        x1, y1, x2, y2 = form_cr.fill_extents()
+        if x2 <= x1 or y2 <= y1:
+            glyph_forms[key] = None
+            return None
+        form_cr.set_source_rgba(*rgba)
+        form_cr.fill()
+        glyph_forms[key] = form
+        return form
 
     def apparatus_layout() -> Any:
         layout = make_layout(font_size=max(7, theme.size_body - 3), width=tw())

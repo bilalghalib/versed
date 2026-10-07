@@ -343,6 +343,95 @@ def test_mupdf_search_finds_logical_arabic_phrase(tmp_path):
         assert pdf[0].search_for("الْمَسْأَلَةِ الْمُؤَخَّرَةِ")
 
 
+def _filled_contours(path):
+    """Closed contours of a Cairo path as rounded tuples (bare move_tos dropped)."""
+    import cairo
+
+    contours, current = [], []
+    for kind, points in path:
+        if kind == cairo.PathDataType.MOVE_TO and current:
+            contours.append(current)
+            current = []
+        current.append((int(kind), tuple(round(value, 6) for value in points)))
+    contours.append(current)
+    return sorted(tuple(contour) for contour in contours if len(contour) > 1)
+
+
+@pytest.mark.parametrize("justify", [False, True])
+def test_glyph_placements_reproduce_layout_path_exactly(justify):
+    """Per-glyph forms sit exactly where Pango's own outline path puts them."""
+    cairo = pytest.importorskip("cairo")
+    gi = pytest.importorskip("gi")
+    from versed.openiti_renderer import (
+        TATWEEL, _configure_pango_backend, _layout_glyph_placements, protect_ltr_runs,
+    )
+
+    _configure_pango_backend()
+    gi.require_version("Pango", "1.0")
+    gi.require_version("PangoCairo", "1.0")
+    from gi.repository import Pango, PangoCairo
+
+    surface = cairo.RecordingSurface(cairo.Content.COLOR_ALPHA, None)
+    cr = cairo.Context(surface)
+    layout = PangoCairo.create_layout(cr)
+    layout.set_font_description(Pango.FontDescription.from_string("Amiri 13"))
+    layout.set_width(int(300 * Pango.SCALE))
+    layout.set_wrap(Pango.WrapMode.WORD)
+    layout.set_auto_dir(True)
+    layout.set_justify(justify)
+    kashida = f"قا{TATWEEL * 5}ل الله تعا{TATWEEL * 3}لى"
+    layout.set_text(
+        protect_ltr_runs(f"{ARABIC_FIXTURE} {kashida} سنة (681هـ/1282م)، abc ﴿الحمد لله﴾"), -1
+    )
+
+    origin_x, origin_y = 41.25, 73.5
+    cr.move_to(origin_x, origin_y)
+    PangoCairo.layout_path(cr, layout)
+    expected = _filled_contours(cr.copy_path())
+    cr.new_path()
+
+    placements = _layout_glyph_placements(layout)
+    assert placements
+    for font, _, glyph, dx, dy in placements:
+        cr.set_scaled_font(PangoCairo.Font.get_scaled_font(font))
+        cr.glyph_path([cairo.Glyph(glyph, origin_x + dx, origin_y + dy)])
+    assert _filled_contours(cr.copy_path()) == expected
+
+
+def test_visible_glyphs_are_shared_forms_not_text_or_repeated_outlines(tmp_path):
+    """Each glyph shape is stored once; pages hold only ``cm``/``Do`` references.
+
+    1.3.0/1.3.1 filled a full outline per glyph occurrence (a 48-page book
+    was 20 MB). The visible layer must also stay text-free, so the only
+    extractable text is the semantic layer's.
+    """
+    fitz = pytest.importorskip("fitz")
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    blocks = [Block(BlockType.PARAGRAPH, ARABIC_FIXTURE) for _ in range(40)]
+    path, _ = _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    curve = re.compile(rb"(?:^|\s)c(?:\s|$)")
+    with fitz.open(path) as pdf:
+        assert pdf.page_count >= 3
+        forms = [
+            xref for xref in range(1, pdf.xref_length())
+            if "/Subtype/Form" in pdf.xref_object(xref, compressed=True)
+        ]
+        # A few hundred distinct glyph shapes at most, shared by every page.
+        assert 0 < len(forms) < 400
+        for page in pdf:
+            content = page.read_contents()
+            assert b" Do" in content
+            assert not curve.search(content), "page repeats glyph outlines inline"
+            # Only the invisible semantic layer's fonts: no Cairo font, no
+            # Type 3 font, nothing in the visible layer that could be read.
+            fonts = {font[4] for font in page.get_fonts(full=True)}
+            assert fonts and all(name.startswith("VersedText") for name in fonts), fonts
+        page_count = pdf.page_count
+    assert os.path.getsize(path) < 40_000 * page_count
+
+
 def _assert_words_are_source_tokens(coords, blocks):
     """Every drawn box names a source token, in source order."""
     tokens = [
