@@ -142,6 +142,31 @@ def _align_rendered_to_source(rendered: str, source: str) -> Tuple[list[int], fr
     return offsets, frozenset(synthetic)
 
 
+def _accepts_keyword(function: Callable[..., Any], name: str) -> bool:
+    """Whether ``function`` takes keyword ``name`` (or any ``**kwargs``)."""
+    import inspect
+
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == parameter.VAR_KEYWORD
+        or (parameter.name == name and parameter.kind != parameter.POSITIONAL_ONLY)
+        for parameter in parameters
+    )
+
+
+def _char_byte_offsets(text: str) -> list[int]:
+    """Return the UTF-8 byte offset of each character of ``text``."""
+    offsets: list[int] = []
+    byte = 0
+    for char in text:
+        offsets.append(byte)
+        byte += len(char.encode("utf-8"))
+    return offsets
+
+
 VisualRun = Tuple[int, list[Tuple[str, int]]]
 
 
@@ -381,14 +406,13 @@ def _attach_semantic_text_layer(
                 page_height = page.rect.height
                 operators: list[str] = []
                 used: set[int] = set()
-                for runs, x, baseline, width, height in lines:
+                for runs, x, baseline, width, font_size in lines:
                     chars = [
                         char for _, run in runs for char, _ in run if char in char_font
                     ]
                     natural = sum(fonts[char_font[char]]["advance"][char] for char in chars)
                     if not chars or natural <= 0:
                         continue
-                    font_size = max(4.0, height * 0.75)
                     scale = 100.0 * width / (natural * font_size) if width > 0 else 100.0
                     shows = []
                     for index, group in _font_groups(chars, char_font):
@@ -822,7 +846,16 @@ def render_book(
     cover_style: str = "auto",
     cover_renderer: Optional[Callable[[Any, float, float, dict, str], None]] = None,
 ) -> Dict[str, Any]:
-    """Render an OpenITI parsed document to PDF using Pango/Cairo."""
+    """Render an OpenITI parsed document to PDF using Pango/Cairo.
+
+    ``cover_renderer(cr, width, height, cover_metadata, cover_style)`` draws
+    the first page. If it also accepts a ``paint_layout`` keyword it receives
+    ``paint_layout(layout)``, which paints a Pango layout at the current
+    point in the current solid colour exactly as the body text is painted:
+    outline glyphs that copy nothing, plus the invisible logical-order text
+    layer. Text drawn with ``PangoCairo.show_layout`` instead copies in
+    visual order (reversed Arabic, spaced-out letter-spaced Latin).
+    """
     _configure_pango_backend()
     import cairo
     import gi
@@ -889,10 +922,13 @@ def render_book(
         rendered_bytes = layout.get_text().encode("utf-8")
         physical_page = page_num if has_front_matter else page_num - 1
         page_lines = semantic_page_text.setdefault(physical_page, [])
+        # The drawn em size, not the line height: tall diacritics and line
+        # spacing would otherwise make invisible glyph boxes overlap the
+        # neighbouring lines, and PDFKit then merges those lines.
+        font_size = layout.get_font_description().get_size() / Pango.SCALE
         line_iter = layout.get_iter()
         while True:
             line = line_iter.get_line_readonly()
-            _, logical = line.get_pixel_extents()
             _, layout_logical = line_iter.get_line_extents()
             visual = _visual_line_runs(rendered_bytes, line, synthetic, layout.get_context())
             if any(not char.isspace() for _, chars in visual for char, _ in chars):
@@ -902,7 +938,7 @@ def render_book(
                         x + layout_logical.x / Pango.SCALE,
                         y + line_iter.get_baseline() / Pango.SCALE,
                         layout_logical.width / Pango.SCALE,
-                        logical.height,
+                        font_size,
                     )
                 )
             if not line_iter.next_line():
@@ -1076,6 +1112,65 @@ def render_book(
         if y + needed > max_y():
             new_page()
 
+    def source_word_spans(
+        source: str,
+        char_bytes: list[int],
+        decoration_words: int = 0,
+        source_words: Optional[list[str]] = None,
+        first_index: int = 0,
+    ) -> list[tuple[int, int, str, int]]:
+        """Locate each source word by its byte span in the drawn text.
+
+        Returns (first byte, last character's byte, name, word index) per
+        word. ``decoration_words`` leading words get no entry; synthetic
+        tatweel never reaches a name.
+        """
+        spans = [match.span() for match in re.finditer(r"\S+", source)][decoration_words:]
+        names = [_semantic_pdf_text(source[start:end]) for start, end in spans]
+        if source_words is not None:
+            if len(source_words) != len(names):
+                raise ValueError(
+                    f"drawn words {names!r} do not match source words {source_words!r}"
+                )
+            names = list(source_words)
+        return [
+            (char_bytes[start], char_bytes[end - 1], name, first_index + index)
+            for index, ((start, end), name) in enumerate(zip(spans, names))
+            if name
+        ]
+
+    def record_word_boxes(
+        layout: Any, words: list[tuple[int, int, str, int]], origin_x: float, origin_y: float
+    ) -> None:
+        """Append one box per word of ``layout`` drawn at (origin_x, origin_y)."""
+        for start_byte, last_char_byte, name, word_index in words:
+            rect_start = layout.index_to_pos(start_byte)
+            # Pango uses UTF-8 byte offsets, but each index must still be a
+            # code-point boundary; the last character's own offset is one.
+            rect_end = layout.index_to_pos(last_char_byte)
+            # Pango returns values in Pango units (1/1024 pixel)
+            py = rect_start.y / Pango.SCALE
+            ph = rect_start.height / Pango.SCALE
+            # For RTL, start.x > end.x; for LTR, start.x < end.x
+            edges = [
+                rect_start.x / Pango.SCALE,
+                (rect_start.x + rect_start.width) / Pango.SCALE,
+                rect_end.x / Pango.SCALE,
+                (rect_end.x + rect_end.width) / Pango.SCALE,
+            ]
+            px = min(edges)
+            pw = max(edges) - px
+            all_word_coords.append({
+                "text": name,
+                "x": origin_x + px,
+                "y": origin_y + py,
+                "width": pw,
+                "height": ph,
+                "page": page_num,
+                "block_index": current_block_index,
+                "word_index": word_index,
+            })
+
     def draw_text(
         text: str,
         font_size: Optional[int] = None,
@@ -1132,20 +1227,11 @@ def render_book(
 
         if _words is None:
             char_bytes, _synthetic = _align_rendered_to_source(text, source)
-            spans = [match.span() for match in re.finditer(r"\S+", source)]
-            _words = []
-            if track_words:
-                spans = spans[decoration_words:]
-                names = [_semantic_pdf_text(source[start:end]) for start, end in spans]
-                if source_words is not None:
-                    if len(source_words) != len(names):
-                        raise ValueError(
-                            f"drawn words {names!r} do not match source words {source_words!r}"
-                        )
-                    names = list(source_words)
-                for index, ((start, end), name) in enumerate(zip(spans, names)):
-                    if name:
-                        _words.append((char_bytes[start], char_bytes[end - 1], name, index))
+            _words = (
+                source_word_spans(source, char_bytes, decoration_words, source_words)
+                if track_words
+                else []
+            )
 
         _, ext = layout.get_pixel_extents()
         spacing = spacing_after if spacing_after is not None else theme.size_body * 0.35
@@ -1265,36 +1351,7 @@ def render_book(
         if y + ext.height > max_y():
             new_page()
 
-        # Extract per-word coordinates before rendering
-        origin_x = ml()
-        origin_y = y
-        for start_byte, last_char_byte, name, word_index in _words:
-            rect_start = layout.index_to_pos(start_byte)
-            # Pango uses UTF-8 byte offsets, but each index must still be a
-            # code-point boundary; the last character's own offset is one.
-            rect_end = layout.index_to_pos(last_char_byte)
-            # Pango returns values in Pango units (1/1024 pixel)
-            py = rect_start.y / Pango.SCALE
-            ph = rect_start.height / Pango.SCALE
-            # For RTL, start.x > end.x; for LTR, start.x < end.x
-            edges = [
-                rect_start.x / Pango.SCALE,
-                (rect_start.x + rect_start.width) / Pango.SCALE,
-                rect_end.x / Pango.SCALE,
-                (rect_end.x + rect_end.width) / Pango.SCALE,
-            ]
-            px = min(edges)
-            pw = max(edges) - px
-            all_word_coords.append({
-                "text": name,
-                "x": origin_x + px,
-                "y": origin_y + py,
-                "width": pw,
-                "height": ph,
-                "page": page_num,
-                "block_index": current_block_index,
-                "word_index": word_index,
-            })
+        record_word_boxes(layout, _words, ml(), y)
 
         cr.set_source_rgb(*(color or theme.color_body))
         cr.move_to(ml(), y)
@@ -1353,6 +1410,12 @@ def render_book(
         _, right_ext = right_layout.get_pixel_extents()
         row_h = max(left_ext.height, right_ext.height)
         check_space(row_h + 10)
+        # Word stream order is the block's: hemistich A (the right-hand,
+        # first-read column) then B, numbered on from A's last word.
+        a_words = source_word_spans(a, _char_byte_offsets(a))
+        b_words = source_word_spans(b, _char_byte_offsets(b), first_index=len(a.split()))
+        record_word_boxes(left_layout, a_words, ml() + col_w + 40, y)
+        record_word_boxes(right_layout, b_words, ml(), y)
         cr.set_source_rgb(*theme.color_verse)
         cr.move_to(ml() + col_w + 40, y)
         paint_layout(left_layout)
@@ -1371,7 +1434,10 @@ def render_book(
     page_num = 0
     has_front_matter = bool((cover_metadata and cover_renderer is not None) or doc.title)
     if cover_metadata and cover_renderer is not None:
-        cover_renderer(cr, W, H, cover_metadata, cover_style)
+        if _accepts_keyword(cover_renderer, "paint_layout"):
+            cover_renderer(cr, W, H, cover_metadata, cover_style, paint_layout=paint_layout)
+        else:
+            cover_renderer(cr, W, H, cover_metadata, cover_style)
     elif doc.title:
         y = H * 0.30
         draw_line(0.4, 0.8)
