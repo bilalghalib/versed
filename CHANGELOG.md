@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.3.3 (unreleased)
+
+### OpenITI typesetter
+
+- **Verse and title words get boxes.** `draw_verse_pair` drew both
+  hemistichs without word coordinates, and `TITLE` blocks were drawn with
+  `track_words=False`, though both are voiced. Verse words are now located
+  by source byte span like body text, hemistich A (the right-hand column)
+  then B, with `word_index` running on across the block (the order versed-app
+  ingestion and the Archive gate expect). Archive gate, timed words boxed,
+  1.3.2 -> 1.3.3: IbnSinanKhafaji.Diwan 55 -> 1,603 of 1,607 (all placed
+  words; the box ink check passes), IbnTaymiyya.CaqidaWasitiyya 4,521 ->
+  4,884 of 4,884; Sakhawi 4,191/4,191 and Tahafut 13,057/13,057 unchanged.
+- **Cover text can copy as logical text.** A `cover_renderer` that accepts a
+  `paint_layout` keyword receives the body's painter: outline glyphs plus
+  the invisible logical text layer. Text drawn with
+  `PangoCairo.show_layout` copied as visual-order Arabic and letter-spaced
+  Latin ("S AK H AW I"). Renderers without the keyword are called as before.
+- **Lines no longer merge in PDFKit.** The invisible text layer sized its
+  glyphs from the line height (0.75 x logical height), so a fully
+  diacritized line's glyph boxes overlapped its neighbours and PDFKit
+  spliced them, with the margin page marker, into one line (Sakhawi p.1).
+  It now uses the drawn em size; PyMuPDF, Poppler and PDFKit each give one
+  line per drawn line, top to bottom (PDFKit lists the margin markers as
+  their own column).
+- **Empty source pages share one marker.** Consecutive page markers with no
+  main text between them print once as a range (`[ص ٦٣–٦٥]`), instead of
+  stacking in one margin spot (Sakhawi, Ibn Taymiyya's `[ص ٥]`...`[ص ١٨]`).
+- **Shamela placeholder rows are not drawn.** A paragraph of dots only
+  (`. . . . .`, Shamela's mark for omitted page text) is skipped; it still
+  counts as a block, so `block_index` values are unchanged.
+- The first three items leave the visible page unchanged (Sakhawi at 100
+  dpi: all 46 body pages identical; the old cover design differs only by
+  antialiasing where its text became outlines). Sizes via the gate, 1.3.2 -> 1.3.3 (with the
+  versed-app cover redesign): Sakhawi 1.08 -> 1.15 MB, Diwan 1.34 -> 1.43 MB
+  (the embedded word map now holds 1,548 more verse rows), Tahafut 3.20 ->
+  3.24 MB, Wasitiyya 0.91 -> 0.96 MB.
+
 ## 1.3.2 (unreleased)
 
 ### OpenITI typesetter

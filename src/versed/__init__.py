@@ -1,6 +1,6 @@
 """versed — local PDF-to-Markdown tooling for Arabic and bilingual texts."""
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
 from .arabic import (
     detect_batch_reversal,
