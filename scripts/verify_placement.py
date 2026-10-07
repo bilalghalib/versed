@@ -60,7 +60,13 @@ def _load_texts(archive: zipfile.ZipFile, names: tuple[str, ...]) -> dict[str, s
     return texts
 
 
-def verify_bundle(bundle_path: Path, model) -> dict:
+def verify_bundle(
+    bundle_path: Path,
+    model,
+    *,
+    suffix: str = "placement",
+    model_name: str = MODEL_NAME,
+) -> dict:
     archive = zipfile.ZipFile(bundle_path)
     structures = [
         json.loads(line)
@@ -145,13 +151,13 @@ def verify_bundle(bundle_path: Path, model) -> dict:
             result["placed"] += int(placed)
 
     sidecar = bundle_path.with_suffix("").with_suffix("")  # strip .alignment.zip
-    out_path = bundle_path.parent / (sidecar.name + ".placement.jsonl")
+    out_path = bundle_path.parent / f"{sidecar.name}.{suffix}.jsonl"
     with out_path.open("w") as handle:
         handle.write(
             json.dumps(
                 {
                     "schema": "versed.alignment.placement-verdicts.v1",
-                    "model": MODEL_NAME,
+                    "model": model_name,
                     "window": WINDOW,
                     "epsilon": EPSILON,
                     "floor": FLOOR,
@@ -166,11 +172,33 @@ def verify_bundle(bundle_path: Path, model) -> dict:
 
 
 def main(argv: list[str]) -> int:
+    import argparse
+
     from sentence_transformers import SentenceTransformer
 
-    model = SentenceTransformer(MODEL_NAME)
-    for arg in argv:
-        result = verify_bundle(Path(arg), model)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("bundles", nargs="+")
+    parser.add_argument(
+        "--model",
+        default=MODEL_NAME,
+        help=(
+            "embedding model used to judge placement. Use a model the aligner "
+            "did NOT score with, so the check stays independent."
+        ),
+    )
+    parser.add_argument(
+        "--suffix",
+        default="placement",
+        help="sidecar suffix, e.g. --suffix placement-qwen",
+    )
+    args = parser.parse_args(argv)
+
+    model = SentenceTransformer(args.model)
+    for bundle in args.bundles:
+        result = verify_bundle(
+            Path(bundle), model, suffix=args.suffix, model_name=args.model
+        )
+        result["model"] = args.model
         print(json.dumps(result))
     return 0
 

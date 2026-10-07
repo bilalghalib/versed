@@ -114,7 +114,11 @@ HAMDALA_PAT = re.compile(r"^الحمد لله رب العالمين")
 LACUNA_PAT = re.compile(r"\.{6,}")
 MORPHO_PAT = re.compile(r"^#~:(\w+):$")
 ARABIC_CHAR = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
-QURAN_BRACKET = re.compile(r"[«»﴿﴾]")
+# Arabic guillemets «…» are ordinary quotation marks throughout OpenITI and
+# occur around dialogue, book titles, maxims, and other non-Qur'anic prose.
+# Only the dedicated Qur'an ornaments route a block as a citation. A later
+# semantic pass can resolve the exact verse span within a mixed paragraph.
+QURAN_BRACKET = re.compile(r"[﴿﴾]")
 RWY_MARKER = re.compile(r"^\$RWY\$\s*")
 MATN_MARKER = re.compile(r"@MATN@")
 HUKM_MARKER = re.compile(r"@HUKM@")
