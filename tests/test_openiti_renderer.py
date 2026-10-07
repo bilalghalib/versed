@@ -895,3 +895,67 @@ def test_each_drawn_line_extracts_as_its_own_line_in_order(tmp_path, monkeypatch
         assert line in out_lines, (line, out_lines)
         positions.append(out_lines.index(line, positions[-1] + 1 if positions else 0))
     assert positions == sorted(positions)
+
+
+def _capture_text_layer(monkeypatch):
+    from versed import openiti_renderer
+
+    captured = {}
+    original = openiti_renderer._attach_semantic_text_layer
+
+    def capture(out_path, page_text):
+        captured.update(page_text)
+        return original(out_path, page_text)
+
+    monkeypatch.setattr(openiti_renderer, "_attach_semantic_text_layer", capture)
+    return captured
+
+
+def _layer_lines(captured):
+    return [
+        "".join(char for _, char in sorted(
+            (offset, char) for _, run in runs for char, offset in run if offset >= 0
+        ))
+        for lines in captured.values()
+        for runs, *_ in lines
+    ]
+
+
+def test_empty_source_pages_share_one_range_marker(tmp_path, monkeypatch):
+    # 0902Sakhawi.SirrMaktum / 0728IbnTaymiyya.CaqidaWasitiyya: markers of
+    # pages with no main text stacked in one spot, between Shamela's
+    # ". . . ." placeholder rows.
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    captured = _capture_text_layer(monkeypatch)
+    dots = " ".join(["."] * 33)
+    blocks = [
+        Block(BlockType.PARAGRAPH, "حسبما اتفق عليه الشيخان"),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 62}),
+        Block(BlockType.PARAGRAPH, dots),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 63}),
+        Block(BlockType.PARAGRAPH, dots),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 64}),
+        Block(BlockType.PARAGRAPH, "وكذا قال لنهد"),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 66}),
+        Block(BlockType.PARAGRAPH, "فقلت أما الحديث"),
+    ]
+    _, result = _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    lines = _layer_lines(captured)
+    markers = [line for line in lines if line.startswith("[ص")]
+    assert markers == ["[ص ٦٢–٦٤]", "[ص ٦٦]"]
+    assert not any("." in line for line in lines)
+    # Block indices still count the skipped placeholder rows.
+    last = [box for box in result["word_coordinates"] if box["text"] == "فقلت"]
+    assert [box["block_index"] for box in last] == [4]
+
+
+def test_page_range_label():
+    from versed.openiti_renderer import _page_range_label
+
+    assert _page_range_label([5]) == "5"
+    assert _page_range_label([5, 6, 7, 8]) == "5–8"
+    assert _page_range_label([5, 7]) == "5، 7"
+    assert _page_range_label(["5a", "6"]) == "5a، 6"
+

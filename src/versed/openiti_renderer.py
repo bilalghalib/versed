@@ -142,6 +142,32 @@ def _align_rendered_to_source(rendered: str, source: str) -> Tuple[list[int], fr
     return offsets, frozenset(synthetic)
 
 
+_PLACEHOLDER_ROW = re.compile(r"^[\s.…]*$")
+
+
+def _is_placeholder_row(block: Any) -> bool:
+    """A paragraph of dots only (". . . . ."), Shamela's mark for omitted text."""
+    return (
+        block.type == BlockType.PARAGRAPH
+        and block.text.count(".") + 3 * block.text.count("…") >= 3
+        and bool(_PLACEHOLDER_ROW.match(block.text))
+    )
+
+
+def _page_range_label(pages: list) -> str:
+    """"63" for one page, "63–64" for a run of consecutive pages, else a list."""
+    labels = [str(page) for page in dict.fromkeys(pages)]
+    if len(labels) == 1:
+        return labels[0]
+    try:
+        numbers = [int(label) for label in labels]
+    except ValueError:
+        return "، ".join(labels)
+    if numbers == list(range(numbers[0], numbers[0] + len(numbers))):
+        return f"{labels[0]}–{labels[-1]}"
+    return "، ".join(labels)
+
+
 def _accepts_keyword(function: Callable[..., Any], name: str) -> bool:
     """Whether ``function`` takes keyword ``name`` (or any ``**kwargs``)."""
     import inspect
@@ -1485,18 +1511,39 @@ def render_book(
     while i < len(doc.blocks):
         block = doc.blocks[i]
 
+        if _is_placeholder_row(block):
+            # A Shamela row of dots stands for a page whose text the source
+            # omits; the page marker range below already records the gap.
+            current_block_index += 1
+            i += 1
+            continue
+
         if block.type == BlockType.PAGE_REF:
+            # Source pages with no main text between their markers share one
+            # marker ("[ص ٦٣–٦٤]") instead of stacking in one spot.
+            pages = [block.meta.get("page", 0)]
+            j = i + 1
+            while j < len(doc.blocks) and (
+                doc.blocks[j].type in (BlockType.PAGE_REF, BlockType.MILESTONE)
+                or _is_placeholder_row(doc.blocks[j])
+            ):
+                if doc.blocks[j].type == BlockType.PAGE_REF:
+                    pages.append(doc.blocks[j].meta.get("page", 0))
+                elif doc.blocks[j].type != BlockType.MILESTONE:
+                    current_block_index += 1
+                j += 1
             if theme.marginal_page_refs:
-                page_ref = block.meta.get("page", 0)
-                ref = f"[ص {str(page_ref).translate(W2E)}]"
+                ref = f"[ص {_page_range_label(pages).translate(W2E)}]"
+                width = 50 if len(pages) == 1 else 62
                 cr.set_source_rgb(*theme.color_page_ref)
-                ref_layout = make_layout(font_size=theme.size_page_ref, width=50)
+                ref_layout = make_layout(font_size=theme.size_page_ref, width=width)
                 ref_layout.set_alignment(Pango.Alignment.CENTER)
                 ref_layout.set_text(ref, -1)
-                x = W - mr() + 8 if page_num % 2 == 0 else ml() - 50
-                cr.move_to(x, y - 5)
+                # Centred where a single marker is centred.
+                x = W - mr() + 33 if page_num % 2 == 0 else ml() - 25
+                cr.move_to(x - width / 2, y - 5)
                 paint_layout(ref_layout)
-            i += 1
+            i = j
             continue
 
         if block.type == BlockType.MILESTONE:
