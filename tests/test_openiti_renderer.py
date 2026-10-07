@@ -667,10 +667,10 @@ def test_verse_numbers_and_page_markers_use_opposite_margins(tmp_path, monkeypat
 
     def boxes(lines, test):
         found = []
-        for runs, x, baseline, width, height in lines:
+        for runs, x, baseline, width, font_size in lines:
             text = "".join(char for _, run in runs for char, _ in run)
             if test(text):
-                found.append((x, baseline - height, x + width, baseline))
+                found.append((x, baseline - font_size, x + width, baseline))
         return found
 
     checked = 0
@@ -686,3 +686,291 @@ def test_verse_numbers_and_page_markers_use_opposite_margins(tmp_path, monkeypat
                 )
                 assert not overlap, (ref, number)
     assert checked
+
+
+def _extract(extractor, path, tmp_path):
+    return {
+        "mupdf": lambda: _mupdf_text(path),
+        "poppler": lambda: _poppler_text(path),
+        "pdfkit": lambda: _pdfkit_text(path, tmp_path),
+    }[extractor]()
+
+
+def _ink_in_box(pixmap, box, scale):
+    x0, y0 = max(0, int(box["x"] * scale)), max(0, int(box["y"] * scale))
+    x1 = min(pixmap.width, int((box["x"] + box["width"]) * scale) + 1)
+    y1 = min(pixmap.height, int((box["y"] + box["height"]) * scale) + 1)
+    samples, stride = pixmap.samples, pixmap.stride
+    return sum(
+        1 for yy in range(y0, y1) for xx in range(x0, x1) if samples[yy * stride + xx] < 110
+    )
+
+
+def test_verse_pairs_box_every_hemistich_word_in_reading_order(tmp_path):
+    # 0466IbnSinanKhafaji.Diwan: verse was drawn without boxes, so only
+    # 55/1,607 timed words had a place on the page.
+    fitz = pytest.importorskip("fitz")
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    pairs = [
+        ("قفا نبك من ذكرى حبيب ومنزل", "بسقط اللوى بين الدخول فحومل"),
+        ("فتوضح فالمقراة لم يعف رسمها", "لما نسجتها من جنوب وشمأل"),
+    ] * 30
+    blocks = [Block(BlockType.PARAGRAPH, "قال الشاعر")]
+    for number, (a, b) in enumerate(pairs, 1):
+        blocks.append(Block(
+            BlockType.VERSE_PAIR, "", hemistich_a=a, hemistich_b=b,
+            meta={"verse_number": str(number)},
+        ))
+    path, result = _render(ParsedDocument(blocks=blocks), tmp_path)
+    coords = result["word_coordinates"]
+
+    # Every hemistich word, A before B, numbered across the block.
+    expected = ["قال", "الشاعر"] + [word for a, b in pairs for word in (a + " " + b).split()]
+    assert [box["text"] for box in coords] == expected
+    _assert_words_are_source_tokens(coords, blocks)
+    for index, (a, b) in enumerate(pairs, 1):
+        verse = [box for box in coords if box["block_index"] == index]
+        n_a = len(a.split())
+        assert [box["word_index"] for box in verse] == list(range(n_a + len(b.split())))
+        # Hemistich A is the right-hand column, B the left-hand one, and
+        # within each the words run right to left.
+        a_boxes, b_boxes = verse[:n_a], verse[n_a:]
+        assert min(box["x"] for box in a_boxes) > max(box["x"] + box["width"] for box in b_boxes)
+        for column in (a_boxes, b_boxes):
+            xs = [box["x"] for box in column]
+            assert xs == sorted(xs, reverse=True)
+    assert len({box["page"] for box in coords}) > 1
+
+    scale = 2.0
+    with fitz.open(path) as pdf:
+        pixmaps = {}
+        for box in coords:
+            page = box["page"] - 1  # no front matter: page numbers start at 1
+            if page not in pixmaps:
+                pixmaps[page] = pdf[page].get_pixmap(
+                    matrix=fitz.Matrix(scale, scale), colorspace=fitz.csGRAY, alpha=False
+                )
+            assert _ink_in_box(pixmaps[page], box, scale) > 10, box
+
+
+COVER_TITLE = "السر المكتوم في الفرق بين المالين المحمود والمذموم"
+COVER_AUTHOR = "السخاوي"
+
+
+def _cover_renderer(calls):
+    def render_cover(cr, width, height, metadata, style, paint_layout=None):
+        import gi
+
+        gi.require_version("Pango", "1.0")
+        gi.require_version("PangoCairo", "1.0")
+        from gi.repository import Pango, PangoCairo
+
+        calls.append(paint_layout)
+        y = 200.0
+        for text, size, spacing in (
+            (metadata["title_ar"], 26, 0),
+            (metadata["author_ar"], 16, 0),
+            (metadata["author_en"].upper(), 9, 3000),
+        ):
+            layout = PangoCairo.create_layout(cr)
+            layout.set_font_description(Pango.FontDescription.from_string(f"Amiri {size}"))
+            layout.set_width(int((width - 72) * Pango.SCALE))
+            layout.set_alignment(Pango.Alignment.CENTER)
+            layout.set_wrap(Pango.WrapMode.WORD)
+            if spacing:
+                attrs = Pango.AttrList()
+                attrs.insert(Pango.attr_letter_spacing_new(spacing))
+                layout.set_attributes(attrs)
+            layout.set_text(text, -1)
+            cr.set_source_rgb(0.2, 0.1, 0.05)
+            cr.move_to(36, y)
+            if paint_layout is None:
+                PangoCairo.show_layout(cr, layout)
+            else:
+                paint_layout(layout)
+            y += layout.get_pixel_extents()[1].height + 20
+
+    return render_cover
+
+
+@pytest.mark.parametrize("extractor", ["mupdf", "poppler", "pdfkit"])
+def test_cover_text_copies_as_logical_text(tmp_path, extractor):
+    # Cairo's own cover text copied as visual-order Arabic ("يواخسلا") and
+    # letter-spaced Latin as "S AK H AW I".
+    fitz = pytest.importorskip("fitz")
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    calls = []
+    path, _ = _render(
+        ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, "بسم الله الرحمن الرحيم")]),
+        tmp_path,
+        cover_metadata={"title_ar": COVER_TITLE, "author_ar": COVER_AUTHOR, "author_en": "Sakhawi"},
+        cover_renderer=_cover_renderer(calls),
+    )
+    assert calls and callable(calls[0])
+    with fitz.open(path) as pdf:
+        cover = pdf[0]
+        # Drawn glyphs are outlines: the only text is the invisible layer.
+        fonts = {font[4] for font in cover.get_fonts(full=True)}
+        assert fonts and all(name.startswith("VersedText") for name in fonts), fonts
+        cover_text = cover.get_text() if extractor == "mupdf" else None
+
+    text = cover_text if extractor == "mupdf" else _extract(extractor, path, tmp_path)
+    cover_part = text.split("بسم الله")[0]
+    flat = _norm_ws(cover_part)
+    assert _norm_ws(COVER_TITLE) in flat
+    assert COVER_AUTHOR in flat
+    assert "SAKHAWI" in flat
+
+
+def test_cover_renderer_without_the_hook_is_still_called(tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    calls = []
+
+    def legacy(cr, width, height, metadata, style):
+        calls.append(style)
+
+    _, result = _render(
+        ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, "بسم الله")]),
+        tmp_path,
+        cover_metadata={"title_ar": "عنوان"},
+        cover_renderer=legacy,
+    )
+    assert calls == ["auto"] and result["pages"] == 1
+
+
+# 0902Sakhawi.SirrMaktum p.1: an undiacritized paragraph, a marginal page
+# marker, then a fully diacritized paragraph. PDFKit spliced the last line of
+# the first paragraph, the marker and the next line into one.
+_PLAIN_PARAGRAPH = (
+    "في «رسالة منسوبة للحسن البصري» رحمه الله في الفريضة السابعة مما يجب على المؤمن من "
+    "الفرائض في اليوم والليلة وهو أن النبي صلى الله عليه وسلم قال «اللهم من أحبني فارزقه "
+    "الكفاف ومن أبغضني فأكثر ماله وولده»"
+)
+_VOCALIZED_PARAGRAPH = (
+    "أَهُوَ صَحِيحٌ أَمْ لَا؟ وَبِمَاذَا يُجْمَعُ بِهِ بَيْنَهُ وَبَيْنَ دُعَائِهِ صَلَّى اللَّهُ عَلَيْهِ "
+    "وَسَلَّمَ لِخَادِمِهِ سَيِّدِنَا أَنَسِ بْنِ مَالِكٍ رَضِيَ اللَّهُ عَنْهُ حَسْبَمَا اتَّفَقَ عَلَيْهِ "
+    "الشَّيْخَانِ بِكَثْرَةِ الْمَالِ وَالْوَلَدِ فَقُلْتُ أَمَّا الْحَدِيثُ فَقَدْ أَخْبَرَتْنِي بِهِ "
+    "خَاتِمَةُ مُسْنَدِي مِصْرَ أُمُّ مُحَمَّدٍ ابْنَةُ عُمَرَ ابْنُ الْعِزِّ بْنِ جَمَاعَةَ"
+)
+
+
+@pytest.mark.parametrize("extractor", ["mupdf", "poppler", "pdfkit"])
+def test_each_drawn_line_extracts_as_its_own_line_in_order(tmp_path, monkeypatch, extractor):
+    from versed import openiti_renderer
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    captured = {}
+    original = openiti_renderer._attach_semantic_text_layer
+
+    def capture(out_path, page_text):
+        captured.update(page_text)
+        return original(out_path, page_text)
+
+    monkeypatch.setattr(openiti_renderer, "_attach_semantic_text_layer", capture)
+    blocks = [
+        Block(BlockType.PARAGRAPH, _PLAIN_PARAGRAPH),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 62}),
+        Block(BlockType.PARAGRAPH, _VOCALIZED_PARAGRAPH),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 63}),
+        Block(BlockType.PARAGRAPH, _PLAIN_PARAGRAPH),
+    ]
+    path, _ = _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    squeeze = lambda value: "".join(_norm_ws(value).split())
+    body_lines = []
+    for runs, *_ in captured[0]:
+        chars = sorted((offset, char) for _, run in runs for char, offset in run if offset >= 0)
+        line = "".join(char for _, char in chars)
+        if "ص" in line and "[" in line:
+            continue  # the marginal page marker
+        body_lines.append(squeeze(line))
+    assert len(body_lines) >= 8
+
+    out_lines = [squeeze(line) for line in _extract(extractor, path, tmp_path).splitlines()]
+    positions = []
+    for line in body_lines:
+        assert line in out_lines, (line, out_lines)
+        positions.append(out_lines.index(line, positions[-1] + 1 if positions else 0))
+    assert positions == sorted(positions)
+
+
+def _capture_text_layer(monkeypatch):
+    from versed import openiti_renderer
+
+    captured = {}
+    original = openiti_renderer._attach_semantic_text_layer
+
+    def capture(out_path, page_text):
+        captured.update(page_text)
+        return original(out_path, page_text)
+
+    monkeypatch.setattr(openiti_renderer, "_attach_semantic_text_layer", capture)
+    return captured
+
+
+def _layer_lines(captured):
+    return [
+        "".join(char for _, char in sorted(
+            (offset, char) for _, run in runs for char, offset in run if offset >= 0
+        ))
+        for lines in captured.values()
+        for runs, *_ in lines
+    ]
+
+
+def test_empty_source_pages_share_one_range_marker(tmp_path, monkeypatch):
+    # 0902Sakhawi.SirrMaktum / 0728IbnTaymiyya.CaqidaWasitiyya: markers of
+    # pages with no main text stacked in one spot, between Shamela's
+    # ". . . ." placeholder rows.
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    captured = _capture_text_layer(monkeypatch)
+    dots = " ".join(["."] * 33)
+    blocks = [
+        Block(BlockType.PARAGRAPH, "حسبما اتفق عليه الشيخان"),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 62}),
+        Block(BlockType.PARAGRAPH, dots),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 63}),
+        Block(BlockType.PARAGRAPH, dots),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 64}),
+        Block(BlockType.PARAGRAPH, "وكذا قال لنهد"),
+        Block(BlockType.PAGE_REF, "", meta={"vol": 1, "page": 66}),
+        Block(BlockType.PARAGRAPH, "فقلت أما الحديث"),
+    ]
+    _, result = _render(ParsedDocument(blocks=blocks), tmp_path)
+
+    lines = _layer_lines(captured)
+    markers = [line for line in lines if line.startswith("[ص")]
+    assert markers == ["[ص ٦٢–٦٤]", "[ص ٦٦]"]
+    assert not any("." in line for line in lines)
+    # Block indices still count the skipped placeholder rows.
+    last = [box for box in result["word_coordinates"] if box["text"] == "فقلت"]
+    assert [box["block_index"] for box in last] == [4]
+
+
+def test_page_range_label():
+    from versed.openiti_renderer import _page_range_label
+
+    assert _page_range_label([5]) == "5"
+    assert _page_range_label([5, 6, 7, 8]) == "5–8"
+    assert _page_range_label([5, 7]) == "5، 7"
+    assert _page_range_label(["5a", "6"]) == "5a، 6"
+
+
+
+def test_title_blocks_box_their_voiced_words(tmp_path):
+    # 0728IbnTaymiyya.CaqidaWasitiyya: 363 timed words sat in TITLE blocks
+    # drawn without boxes.
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+
+    blocks = [
+        Block(BlockType.TITLE, "فصل في الإيمان بالله"),
+        Block(BlockType.PARAGRAPH, "ومن الإيمان بالله"),
+    ]
+    _, result = _render(ParsedDocument(blocks=blocks), tmp_path)
+    assert [box["text"] for box in result["word_coordinates"]] == (
+        "فصل في الإيمان بالله ومن الإيمان بالله".split()
+    )
