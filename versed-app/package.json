@@ -1,0 +1,14 @@
+{
+  "name": "versed-app-cmc-program-ux",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "preview": "node --experimental-strip-types preview/server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "typescript": "^7.0.2"
+  }
+}
