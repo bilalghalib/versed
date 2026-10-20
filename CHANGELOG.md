@@ -2,6 +2,14 @@
 
 ## 1.3.3 (unreleased)
 
+### Extraction
+
+- **A separator pipe is no longer turned into `ff`.** The broken-CMap repair
+  (`|` -> `ff`) fired on real pipes, so the PNAS keyword line read
+  `well-beingff meta-awarenessff`. The repair is for fonts whose `ff` glyph
+  is U+007C, which keeps the pipe inside the letters' own span; a pipe in a
+  span of its own is now left alone (`repair_words_keeping_separator_pipes`).
+
 ### OpenITI typesetter
 
 - **Verse and title words get boxes.** `draw_verse_pair` drew both
