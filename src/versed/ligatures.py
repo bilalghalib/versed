@@ -203,3 +203,46 @@ def repair_words_for_dropped_ligatures(
             continue
         repaired.append((w[0], w[1], w[2], w[3], new_text) + tuple(w[5:]))
     return repaired
+
+
+def standalone_pipe_boxes(page) -> List[Tuple[float, float, float, float]]:
+    """Boxes of text spans that consist only of ``|``.
+
+    The broken-CMap repair is for fonts whose ``ff`` glyph is U+007C, so the
+    pipe sits inside the same span as the letters (``o|`` for ``off``). A
+    pipe set in a span of its own is a real separator
+    (``well-being| meta-awareness|``) and must not become ``ff``.
+    """
+    boxes: List[Tuple[float, float, float, float]] = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if (span.get("text") or "").strip() == "|":
+                    boxes.append(tuple(span["bbox"]))
+    return boxes
+
+
+def repair_words_keeping_separator_pipes(
+    words_raw: Iterable[Tuple],
+    pipe_boxes: Iterable[Tuple[float, float, float, float]],
+    tol: float = 1.0,
+) -> List[Tuple]:
+    """Like :func:`repair_words_for_dropped_ligatures`, but a word that contains
+    a standalone-span pipe (see :func:`standalone_pipe_boxes`) keeps its ``|``.
+    """
+    boxes = list(pipe_boxes)
+
+    def holds_separator(w: Tuple) -> bool:
+        return "|" in (w[4] or "") and any(
+            b[0] >= w[0] - tol and b[2] <= w[2] + tol
+            and b[1] >= w[1] - tol and b[3] <= w[3] + tol
+            for b in boxes
+        )
+
+    repaired: List[Tuple] = []
+    for w in words_raw:
+        if len(w) > 4 and holds_separator(w):
+            repaired.append(w)
+        else:
+            repaired.extend(repair_words_for_dropped_ligatures([w]))
+    return repaired
