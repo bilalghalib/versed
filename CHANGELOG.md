@@ -1,3 +1,16 @@
+# 1.3.4 — Evidence-bound macron repair
+
+- Compose overprinted spacing macrons only when raw glyphs agree with the source
+  word and the macron overlaps exactly one adjacent vowel. Preserve every source
+  word box and block/line/word identifier; ambiguous cases remain verbatim.
+- Do not apply the unpublished draft's global German/Turkish substitutions,
+  punctuation-based underdots or cross-token joins.
+- Verified 12 repair cases and 26 real English/Arabic pages (7,397 native words):
+  only `Majn¯un:` became `Majnūn:`; every box and source identity stayed unchanged.
+- Full package check: 231 passed, 3 skipped, 3 xfailed; 11 renderer failures also
+  reproduce on unchanged main (PDFKit Arabic round trips and one MuPDF line-order
+  case). These are outside extraction; no renderer change is included.
+
 # Changelog
 
 ## 1.3.3 (unreleased)
