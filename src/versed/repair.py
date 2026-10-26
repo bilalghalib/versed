@@ -132,3 +132,67 @@ def repair_words_with_font_info(words_raw, font_spans):
                 w = (x0, y0, x1, y1, new_text) + w[5:]
         repaired.append(w)
     return repaired
+
+
+def repair_words_with_glyph_info(words_raw, raw_dict):
+    """Compose overprinted spacing macrons using original character geometry.
+
+    Only repairs within one source word, with exact raw-character agreement and
+    one adjacent Latin vowel under the mark. Never joins word tuples, guesses
+    underdots from punctuation, or changes an unaccented Turkish dotless i.
+    Bboxes, source block/line/word identities and tuple metadata stay unchanged.
+    Ambiguous evidence is returned verbatim.
+    """
+    import unicodedata
+
+    lines = {}
+    for block_index, block in enumerate(raw_dict.get("blocks", [])):
+        if block.get("type") != 0:
+            continue
+        for line_index, line in enumerate(block.get("lines", [])):
+            if tuple(line.get("dir", (1, 0))) != (1, 0):
+                continue
+            lines[(block.get("number", block_index), line_index)] = [
+                char for span in line.get("spans", []) for char in span.get("chars", [])
+            ]
+    result = []
+    for word in words_raw:
+        text = word[4]
+        if "¯" not in text or len(word) < 8:
+            result.append(word)
+            continue
+        chars = [c for c in lines.get((word[5], word[6]), [])
+                 if word[0] <= (c["bbox"][0] + c["bbox"][2]) / 2 <= word[2]
+                 and word[1] <= (c["bbox"][1] + c["bbox"][3]) / 2 <= word[3]]
+        if "".join(c["c"] for c in chars) != text:
+            result.append(word)
+            continue
+        replacements, removed, used = {}, set(), set()
+        for index, mark in enumerate(chars):
+            if mark["c"] != "¯" or mark.get("synthetic"):
+                continue
+            matches = []
+            for target in (index - 1, index + 1):
+                if not 0 <= target < len(chars):
+                    continue
+                base = chars[target]
+                if base["c"] not in "aeiouAEIOUı" or base.get("synthetic"):
+                    continue
+                mb, bb = mark["bbox"], base["bbox"]
+                width = bb[2] - bb[0]
+                overlap = min(mb[2], bb[2]) - max(mb[0], bb[0])
+                height = bb[3] - bb[1]
+                if (width > 0 and height > 0 and overlap >= 0.65 * width
+                        and 0 < mb[2] - mb[0] <= 1.3 * width
+                        and abs(mark["origin"][1] - base["origin"][1]) <= 0.25 * height
+                        and mark["origin"][1] <= base["origin"][1] + 0.05 * height):
+                    matches.append(target)
+            if len(matches) == 1 and matches[0] not in used:
+                target = matches[0]
+                base_text = "i" if chars[target]["c"] == "ı" else chars[target]["c"]
+                replacements[target] = unicodedata.normalize("NFC", base_text + "\u0304")
+                removed.add(index)
+                used.add(target)
+        repaired = "".join(replacements.get(i, c["c"]) for i, c in enumerate(chars) if i not in removed)
+        result.append(tuple(word[:4]) + (repaired,) + tuple(word[5:]))
+    return result

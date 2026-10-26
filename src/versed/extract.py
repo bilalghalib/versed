@@ -17,7 +17,7 @@ from .ligatures import (
 )
 from .markdown import BUILDER_VERSION, build_enhanced_markdown
 from .qcf import QCFDecoder, is_qcf_text
-from .repair import extract_repairable_font_spans, repair_words_with_font_info
+from .repair import extract_repairable_font_spans, repair_words_with_font_info, repair_words_with_glyph_info
 from .types import AlignedWord, Document
 
 
@@ -191,6 +191,8 @@ def extract_repaired_words(
     """
     if words_raw is None:
         words_raw = page.get_text("words")
+    if any("¯" in word[4] for word in words_raw):
+        words_raw = repair_words_with_glyph_info(words_raw, page.get_text("rawdict"))
     if not words_raw:
         return []
     # Sabon repair needs font spans from the page; OCR-pre-extracted words

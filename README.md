@@ -56,7 +56,8 @@ versed verify-alignment aligned.zip
 
 ## Public modules
 
-- `versed.repair`: Sabon mojibake repair helpers
+- `versed.repair`: font-bound Sabon repairs and geometry-verified overprinted macrons
+  (original word boxes/IDs retained; ambiguous accents remain unchanged)
 - `versed.qcf`: QCF Quran font decoding
 - `versed.classify`: local page classification and backend selection
 - `versed.routing`: cost-aware routing heuristics
