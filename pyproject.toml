@@ -1,7 +1,7 @@
 [project]
 name = "versed-pdf"
-version = "1.3.4"
-description = "Semantic PDF-to-Markdown engine for Arabic and bilingual texts with local routing and repair"
+version = "1.3.5"
+description = "Arabic and bilingual PDF extraction, glyph repair and source-mapped reading preparation"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -22,6 +22,12 @@ classifiers = [
 keywords = ["arabic", "pdf", "markdown", "text-extraction", "quran", "ocr", "nlp"]
 
 dependencies = []  # Zero required deps! Pure Python for string repair.
+
+[project.urls]
+Homepage = "https://github.com/bilalghalib/versed"
+Documentation = "https://github.com/bilalghalib/versed#readme"
+Issues = "https://github.com/bilalghalib/versed/issues"
+Changelog = "https://github.com/bilalghalib/versed/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 pdf = ["pymupdf>=1.24.0", "Pillow>=10.0.0", "fonttools>=4.0.0"]

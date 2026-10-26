@@ -1,3 +1,12 @@
+# 1.3.5 — Reading preparation guide
+
+- Explain extraction, source mappings, scanned-page limitations and the separate
+  speech/timing responsibilities of reading applications.
+- Add a tested native-PDF example for reviewable cross-page chunks with exact
+  source-word IDs, boxes and character offsets. No TTS/provider calls.
+- Add package project links and synchronize package version metadata.
+- Extraction behavior remains unchanged from 1.3.4.
+
 # 1.3.4 — Evidence-bound macron repair
 
 - Compose overprinted spacing macrons only when raw glyphs agree with the source

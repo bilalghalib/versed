@@ -1,0 +1,2 @@
+include examples/prepare_reading_chunks.py
+include docs/ALIGNMENT.md
