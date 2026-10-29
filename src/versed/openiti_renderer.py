@@ -871,6 +871,8 @@ def render_book(
     cover_metadata: Optional[dict] = None,
     cover_style: str = "auto",
     cover_renderer: Optional[Callable[[Any, float, float, dict, str], None]] = None,
+    *,
+    geometry_contract: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Render an OpenITI parsed document to PDF using Pango/Cairo.
 
@@ -881,7 +883,35 @@ def render_book(
     outline glyphs that copy nothing, plus the invisible logical-order text
     layer. Text drawn with ``PangoCairo.show_layout`` instead copies in
     visual order (reversed Arabic, spaced-out letter-spaced Latin).
+    ``geometry_contract="source-v1"`` emits exact source whitespace tokens,
+    keyed by their actual ``doc.blocks`` index and per-block word index.
+    Coordinates are logical shaped cells in PDF points, top-left origin,
+    with physical one-based pages. Generated cover/header/ornament text is
+    excluded. Verse-pair source order is first hemistich then second; hadith
+    order is isnad, matn, hukm. Transformed editorial/apparatus blocks and
+    words split across lines fail closed. The caller binds these source slots
+    to stable application word IDs; no extraction or text matching is needed.
     """
+    if geometry_contract not in (None, "source-v1"):
+        raise ValueError(f"Unknown geometry contract: {geometry_contract}")
+    source_geometry = geometry_contract == "source-v1"
+    source_tokens: dict[int, list[str]] = {}
+    if source_geometry:
+        plain = {BlockType.TITLE, BlockType.HEADING_1, BlockType.HEADING_2,
+                 BlockType.HEADING_3, BlockType.HEADING_4, BlockType.HEADING_5,
+                 BlockType.PARAGRAPH, BlockType.BASMALA, BlockType.HAMDALA,
+                 BlockType.VERSE_LINE, BlockType.QURAN_CITATION, BlockType.ISNAD,
+                 BlockType.MATN, BlockType.HUKM}
+        for index, block in enumerate(doc.blocks):
+            if block.type in plain:
+                source_tokens[index] = block.text.split()
+            elif block.type == BlockType.VERSE_PAIR:
+                source_tokens[index] = block.hemistich_a.split() + block.hemistich_b.split()
+            elif block.type == BlockType.HADITH_UNIT:
+                source_tokens[index] = (block.isnad_text.split() + block.matn_text.split()
+                                        + block.hukm_text.split())
+            elif block.type not in (BlockType.PAGE_REF, BlockType.MILESTONE):
+                raise ValueError(f"source-v1 cannot map transformed block {index}: {block.type.value}")
     _configure_pango_backend()
     import cairo
     import gi
@@ -1186,13 +1216,42 @@ def render_book(
             ]
             px = min(edges)
             pw = max(edges) - px
+            if source_geometry:
+                expected = source_tokens.get(current_block_index, [])
+                if word_index >= len(expected):
+                    raise ValueError(f"Extra rendered source word at block {current_block_index}")
+                # The release renderer already carries exact source byte spans
+                # through kashida insertion and page splits. Use every shaped
+                # cell, including interior ligatures, rather than just edges.
+                encoded = layout.get_text().encode("utf-8")
+                segment = encoded[start_byte:].decode("utf-8")
+                rectangles = []
+                byte = start_byte
+                for char in segment:
+                    if byte > last_char_byte:
+                        break
+                    rectangles.append(layout.index_to_pos(byte))
+                    byte += len(char.encode("utf-8"))
+                if len({rect.y for rect in rectangles}) != 1:
+                    raise ValueError("source-v1 cannot represent a word split across layout lines")
+                edges = [edge / Pango.SCALE for rect in rectangles
+                         for edge in (rect.x, rect.x + rect.width)]
+                px = min(edges)
+                pw = max(edges) - px
+                py = min(rect.y for rect in rectangles) / Pango.SCALE
+                ph = max(rect.y + rect.height for rect in rectangles) / Pango.SCALE - py
+                if _semantic_pdf_text(expected[word_index]) != name:
+                    raise ValueError(f"Changed source word at block {current_block_index}, word {word_index}")
+                name = expected[word_index]
+                if pw <= 0 or ph <= 0:
+                    raise ValueError("source-v1 requires a positive layout cell")
             all_word_coords.append({
                 "text": name,
                 "x": origin_x + px,
                 "y": origin_y + py,
                 "width": pw,
                 "height": ph,
-                "page": page_num,
+                "page": page_num + (1 if source_geometry and has_front_matter else 0),
                 "block_index": current_block_index,
                 "word_index": word_index,
             })
@@ -1209,6 +1268,7 @@ def render_book(
         track_words: bool = True,
         decoration_words: int = 0,
         source_words: Optional[list[str]] = None,
+        _word_index_offset: int = 0,
         _allow_split: bool = True,
         _words: Optional[list[tuple[int, int, str, int]]] = None,
         _synthetic: frozenset[int] = frozenset(),
@@ -1254,7 +1314,8 @@ def render_book(
         if _words is None:
             char_bytes, _synthetic = _align_rendered_to_source(text, source)
             _words = (
-                source_word_spans(source, char_bytes, decoration_words, source_words)
+                source_word_spans(source, char_bytes, decoration_words, source_words,
+                                  first_index=_word_index_offset)
                 if track_words
                 else []
             )
@@ -1333,6 +1394,8 @@ def render_book(
                             continue
                         end_line = line_of(end)
                         if not first <= end_line < last:
+                            if source_geometry:
+                                raise ValueError("source-v1 cannot represent a word split across layout lines")
                             # The word runs onto the next page: box the part
                             # drawn here.
                             end_line = start_line
@@ -1510,6 +1573,8 @@ def render_book(
     )
     while i < len(doc.blocks):
         block = doc.blocks[i]
+        if source_geometry:
+            current_block_index = i
 
         if _is_placeholder_row(block):
             # A Shamela row of dots stands for a page whose text the source
@@ -1713,6 +1778,7 @@ def render_book(
             )
 
         elif block.type == BlockType.HADITH_UNIT:
+            hadith_offset = 0
             if prev:
                 y += 4
             if block.isnad_text:
@@ -1722,7 +1788,9 @@ def render_book(
                     color=theme.color_isnad,
                     use_kashida=True,
                     spacing_after=4,
+                    _word_index_offset=hadith_offset if source_geometry else 0,
                 )
+            hadith_offset += len(block.isnad_text.split())
             if block.matn_text:
                 draw_text(
                     block.matn_text,
@@ -1730,7 +1798,9 @@ def render_book(
                     color=theme.color_hadith,
                     use_kashida=True,
                     spacing_after=4,
+                    _word_index_offset=hadith_offset if source_geometry else 0,
                 )
+            hadith_offset += len(block.matn_text.split())
             if block.hukm_text:
                 draw_text(
                     block.hukm_text,
@@ -1738,6 +1808,7 @@ def render_book(
                     color=theme.color_hukm,
                     use_kashida=True,
                     spacing_after=8,
+                    _word_index_offset=hadith_offset if source_geometry else 0,
                 )
 
         elif block.type == BlockType.ISNAD:
@@ -1835,6 +1906,12 @@ def render_book(
         if block.type not in (BlockType.PAGE_REF, BlockType.MILESTONE):
             current_block_index += 1
 
+    if source_geometry:
+        actual = [(row["block_index"], row["word_index"], row["text"]) for row in all_word_coords]
+        expected = [(index, offset, token) for index, tokens in source_tokens.items()
+                    for offset, token in enumerate(tokens)]
+        if actual != expected:
+            raise ValueError("source-v1 geometry did not cover the exact source token stream")
     decorate_current_page()
     # Apparatus still pending after the last body line continues on
     # notes-only pages; it is never dropped.
@@ -1854,11 +1931,16 @@ def render_book(
 
     return {
         "path": out_path,
-        "pages": page_num,
+        "pages": page_num + (1 if source_geometry and has_front_matter else 0),
         "blocks": len(doc.blocks),
         "block_types": type_counts,
         "entities": entity_count,
         "review_tags": review_count,
         "theme": theme_name,
         "word_coordinates": all_word_coords,
+        **({"geometry_contract": "source-v1",
+            "geometry_units": "points", "geometry_origin": "top-left",
+            "geometry_page_base": 1,
+            "geometry_source_order": "doc.blocks index; whitespace tokens; verse_pair a then b; hadith isnad then matn then hukm"}
+           if source_geometry else {}),
     }

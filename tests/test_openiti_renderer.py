@@ -974,3 +974,62 @@ def test_title_blocks_box_their_voiced_words(tmp_path):
     assert [box["text"] for box in result["word_coordinates"]] == (
         "فصل في الإيمان بالله ومن الإيمان بالله".split()
     )
+
+
+def test_source_geometry_tracks_exact_tokens_poetry_and_actual_block_indices(tmp_path):
+    import fitz
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed.openiti_renderer import render_book
+
+    doc = ParsedDocument(title="عنوان الغلاف", author="مؤلف الغلاف", blocks=[
+        Block(BlockType.PAGE_REF, "", meta={"page": 1}),
+        Block(BlockType.TITLE, "عنوان النص"),
+        Block(BlockType.HEADING_1, "فصل جديد"),
+        Block(BlockType.PARAGRAPH, "نص عربي (12) بكلمةـ أصلية"),
+        Block(BlockType.VERSE_PAIR, "", hemistich_a="صدر البيت هنا", hemistich_b="عجز البيت هنا"),
+        Block(BlockType.QURAN_CITATION, "﴿قُلْ هُوَ اللَّهُ أَحَدٌ﴾"),
+        Block(BlockType.HADITH_UNIT, "", isnad_text="قال الراوي", matn_text="هذا متن", hukm_text="حديث صحيح"),
+    ])
+    result = render_book(doc, str(tmp_path / "source.pdf"), geometry_contract="source-v1")
+    assert result["geometry_contract"] == "source-v1"
+    expected = []
+    for i, block in enumerate(doc.blocks):
+        tokens = (block.hemistich_a.split() + block.hemistich_b.split()
+                  if block.type == BlockType.VERSE_PAIR else
+                  block.isnad_text.split() + block.matn_text.split() + block.hukm_text.split()
+                  if block.type == BlockType.HADITH_UNIT else block.text.split())
+        expected.extend((i, j, t) for j, t in enumerate(tokens))
+    coords = result["word_coordinates"]
+    assert [(r["block_index"], r["word_index"], r["text"]) for r in coords] == expected
+    assert all(r["page"] >= 2 for r in coords)  # Generated cover has no canonical coordinates.
+    poetry = [r for r in coords if r["block_index"] == 4]
+    assert min(r["x"] for r in poetry[:3]) > max(r["x"] for r in poetry[3:])
+    with fitz.open(result["path"]) as pdf:
+        for r in coords:
+            page = pdf[r["page"] - 1]
+            assert 0 <= r["x"] < r["x"] + r["width"] <= page.rect.width
+            assert 0 <= r["y"] < r["y"] + r["height"] <= page.rect.height
+
+
+def test_source_geometry_preserves_word_order_across_pages(tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed.openiti_renderer import render_book
+
+    words = ["كلمة", "عَلِيّ", "بسم", "الله"] * 250
+    result = render_book(ParsedDocument(blocks=[Block(BlockType.PARAGRAPH, " ".join(words))]),
+                         str(tmp_path / "long.pdf"), geometry_contract="source-v1")
+    rows = result["word_coordinates"]
+    assert [r["text"] for r in rows] == words
+    assert [r["word_index"] for r in rows] == list(range(len(words)))
+    assert len({r["page"] for r in rows}) > 1
+
+
+def test_source_geometry_rejects_unmapped_generated_blocks_before_render(tmp_path):
+    from versed.openiti_parser import Block, BlockType, ParsedDocument
+    from versed.openiti_renderer import render_book
+
+    out = tmp_path / "rejected.pdf"
+    with pytest.raises(ValueError, match="cannot map transformed block"):
+        render_book(ParsedDocument(blocks=[Block(BlockType.APPARATUS_NOTE, "حاشية")]),
+                    str(out), geometry_contract="source-v1")
+    assert not out.exists()
