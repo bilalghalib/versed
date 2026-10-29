@@ -1,3 +1,16 @@
+# 1.3.6 — Exact source geometry for Arabic typesetting
+
+- Add opt-in `geometry_contract="source-v1"` to `render_openiti_book`.
+  It emits exact source tokens with actual parsed block indices, per-block
+  word indices, physical one-based pages and layout-time word boxes in PDF
+  points. Generated cover text is excluded; poetry and hadith word order is
+  preserved. Unsupported transformations or fragmented words fail explicitly.
+- Keep the released parser and default rendering behavior unchanged. A reviewed
+  full-book canary binds all 21,996 source words over 84 physical pages.
+- Known baseline limitation remains: MuPDF 1.28.2 can move a line-final
+  Arabic vowel mark to another extracted line. PDFKit and Poppler pass that
+  regression fixture; the failing MuPDF assertion is retained.
+
 # 1.3.5 — Reading preparation guide
 
 - Explain extraction, source mappings, scanned-page limitations and the separate
